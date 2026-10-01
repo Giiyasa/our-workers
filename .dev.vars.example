@@ -1,0 +1,25 @@
+# ==== Rahasia untuk dev LOKAL (dibaca wrangler sebagai `env.*`) ====
+# File ini git-ignored. JANGAN pernah di-commit.
+# Untuk produksi pakai: wrangler secret put DIRECT_URL
+
+# ---------------------------------------------------------------------------
+# DIRECT_URL — string koneksi Postgres, LANGSUNG tanpa Hyperdrive.
+#
+# PENTING: `wrangler dev` mode LOKAL (Miniflare) tidak bisa menyambung ke
+# database di internet. Worker-mu akan jalan dan /api/health membalas, tapi
+# rute yang menyentuh DB akan gagal. Untuk uji DB dari mesin sendiri pakai:
+#
+#     wrangler dev --remote
+#
+# Format: postgresql://postgres:PASSWORD@db.<project-ref>.supabase.co:5432/postgres
+#
+# CATATAN KEAMANAN: jalur langsung ini TIDAK terenkripsi (lihat penjelasan
+# panjang di src/index.ts). Jangan dipakai untuk data sensitif tanpa
+# membatasi hak akses role-nya.
+# ---------------------------------------------------------------------------
+DIRECT_URL="GANTI_DENGAN_CONNECTION_STRING"
+
+# Token untuk rute tulis (POST /api/games).
+# Bikin acak yang panjang, contoh:
+#   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+WRITE_TOKEN="GANTI_DENGAN_TOKEN_ACAK_PANJANG"

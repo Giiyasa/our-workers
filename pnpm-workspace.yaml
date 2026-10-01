@@ -1,0 +1,8 @@
+# Pengaturan pnpm 11+ (dibaca oleh pnpm, bukan lagi dari package.json).
+#
+# esbuild & workerd perlu menjalankan postinstall-nya sendiri untuk
+# mengunduh binary platform. Tanpa izin ini, `pnpm install`/`pnpm test`
+# gagal dengan ERR_PNPM_IGNORED_BUILDS.
+allowBuilds:
+  esbuild: true
+  workerd: true

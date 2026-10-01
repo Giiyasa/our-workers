@@ -1,0 +1,21 @@
+{
+	"name": "worker-toko",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-09-26",
+	// postgres.js butuh API Node (net/tls) yang disediakan flag ini.
+	"compatibility_flags": ["nodejs_compat"],
+	// CATATAN: tidak ada binding Hyperdrive di sini. Worker menyambung
+	// langsung ke Postgres memakai secret DIRECT_URL.
+	//
+	// Password TIDAK ditulis di file ini dan TIDAK ikut git. Nilainya
+	// dipasang lewat:
+	//   produksi : wrangler secret put DIRECT_URL
+	//   lokal    : file .dev.vars (sudah git-ignored)
+	"secrets": {
+		"required": ["DIRECT_URL", "WRITE_TOKEN"],
+	},
+	"observability": {
+		"enabled": true,
+	},
+	"upload_source_maps": true,
+}
