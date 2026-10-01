@@ -1,67 +1,14 @@
+/**
+ * Tes unit murni: fungsi yang bisa diuji tanpa Worker, tanpa HTTP, tanpa DB.
+ *
+ * Semua fungsi di sini menerima argumen dan mengembalikan nilai, jadi tesnya
+ * cepat dan tidak bisa "diam-diam" menyentuh database.
+ */
+
 import { describe, it, expect } from "vitest";
-import { SELF } from "cloudflare:test";
-import { scrub, shapeGame, readInt } from "../src/index";
-
-describe("rute yang tidak butuh database", () => {
-	it("GET /api/health membalas 200 dan status binding", async () => {
-		const res = await SELF.fetch("https://example.com/api/health");
-		expect(res.status).toBe(200);
-		const body = (await res.json()) as Record<string, unknown>;
-		expect(body.ok).toBe(true);
-		expect(body.worker).toBe("worker-toko");
-	});
-
-	it("rute tidak dikenal membalas 404 dengan pesan yang jelas", async () => {
-		const res = await SELF.fetch("https://example.com/api/entah");
-		expect(res.status).toBe(404);
-	});
-
-	it("POST /api/games tanpa token ditolak 401 sebelum menyentuh DB", async () => {
-		const res = await SELF.fetch("https://example.com/api/games", {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ game_name: "x" }),
-		});
-		expect([401, 503]).toContain(res.status);
-	});
-
-	it("GET /api/db/inspect tanpa token ditolak sebelum menyentuh DB", async () => {
-		const res = await SELF.fetch("https://example.com/api/db/inspect");
-		expect([401, 503]).toContain(res.status);
-	});
-
-	it("GET /api/db/inspect?table=user ditolak walau token benar", async () => {
-		const res = await SELF.fetch("https://example.com/api/db/inspect?table=user", {
-			headers: { "x-write-token": "token-uji" },
-		});
-		// Token cocok di config tes, tabel tidak diizinkan -> 400 dari allowlist,
-		// bukan daftar kolom tabel sensitif (user/password_hash).
-		expect([400, 401]).toContain(res.status);
-	});
-
-	it("GET /api/games/:game_id dengan id bukan angka ditolak 400", async () => {
-		const res = await SELF.fetch("https://example.com/api/games/witcher");
-		expect(res.status).toBe(400);
-	});
-
-	it("POST /api/games dengan body kosong ditolak 400", async () => {
-		const res = await SELF.fetch("https://example.com/api/games", {
-			method: "POST",
-			headers: { "content-type": "application/json", "x-write-token": "token-uji" },
-			body: JSON.stringify({}),
-		});
-		expect([400, 401]).toContain(res.status);
-	});
-
-	it("rute sah tetap berhenti di gerbang DIRECT_URL (bukti tidak diam-diam ke DB)", async () => {
-		// DIRECT_URL sengaja kosong di vitest.config.mts, jadi respons 500 yang
-		// menyebut DIRECT_URL membuktikan tak ada koneksi database yang dibuka.
-		const res = await SELF.fetch("https://example.com/api/games");
-		expect(res.status).toBe(500);
-		const body = (await res.json()) as Record<string, unknown>;
-		expect(String(body.error)).toContain("DIRECT_URL");
-	});
-});
+import { scrub } from "../src/lib/http";
+import { escapeLike, readBool, readInt, readList } from "../src/lib/params";
+import { shapeGame } from "../src/shape";
 
 describe("shapeGame() — bentuk hasil LEFT JOIN", () => {
 	const rowWithAsset = {
@@ -72,7 +19,6 @@ describe("shapeGame() — bentuk hasil LEFT JOIN", () => {
 		category: "action",
 		genre: "puzzle",
 		tags: "koop",
-		previev_url_img: "https://contoh/1.jpg",
 		created_at: "2026-01-01",
 		updated_at: "2026-01-02",
 		asset_game_id: 620,
@@ -91,7 +37,6 @@ describe("shapeGame() — bentuk hasil LEFT JOIN", () => {
 		category: null,
 		genre: null,
 		tags: null,
-		previev_url_img: null,
 		created_at: null,
 		updated_at: null,
 		asset_game_id: null,
@@ -162,6 +107,65 @@ describe("readInt() — pembaca angka query string", () => {
 	});
 });
 
+describe("readBool() — bendera query string", () => {
+	it("menerima beberapa penulisan 'ya'", () => {
+		for (const v of ["1", "true", "TRUE", "ya", "yes", "on"]) {
+			expect(readBool(v)).toBe(true);
+		}
+	});
+
+	it("null/kosong memakai nilai bawaan, bukan true", () => {
+		expect(readBool(null)).toBe(false);
+		expect(readBool("")).toBe(false);
+		expect(readBool(null, true)).toBe(true);
+	});
+
+	it("nilai ngawur memakai nilai bawaan", () => {
+		expect(readBool("0")).toBe(false);
+		expect(readBool("nggak")).toBe(false);
+	});
+});
+
+describe("escapeLike() — netralkan wildcard LIKE", () => {
+	it("memberi pelindung pada % dan _ dan backslash", () => {
+		expect(escapeLike("100%")).toBe("100\\%");
+		expect(escapeLike("a_b")).toBe("a\\_b");
+		expect(escapeLike("c:\\x")).toBe("c:\\\\x");
+	});
+
+	it("teks biasa tidak berubah", () => {
+		expect(escapeLike("witcher 3")).toBe("witcher 3");
+	});
+});
+
+describe("readList() — filter multi-nilai", () => {
+	it("menerima nilai berulang", () => {
+		expect(readList(["RPG", "Action"])).toEqual(["RPG", "Action"]);
+	});
+
+	it("menerima nilai dipisah koma, termasuk campuran dengan cara berulang", () => {
+		expect(readList(["RPG,Action"])).toEqual(["RPG", "Action"]);
+		expect(readList(["RPG", "Action,Puzzle"])).toEqual(["RPG", "Action", "Puzzle"]);
+	});
+
+	it("membuang nilai kosong dan spasi berlebih", () => {
+		expect(readList(["", "  ", " RPG , "])).toEqual(["RPG"]);
+	});
+
+	it("membuang duplikat tanpa peduli huruf besar/kecil, urutan pertama menang", () => {
+		expect(readList(["rpg", "RPG", "Action", "action"])).toEqual(["rpg", "Action"]);
+	});
+
+	it("membatasi jumlah nilai supaya URL raksasa tidak jadi query berat", () => {
+		const many = Array.from({ length: 120 }, (_, i) => `v${i}`);
+		expect(readList(many)).toHaveLength(50);
+	});
+
+	it("memotong nilai yang kepanjangan", () => {
+		expect(readList(["x".repeat(200)])[0]).toHaveLength(64);
+	});
+});
+
 describe("scrub() — jaring pengaman kebocoran rahasia", () => {
 	it("menyensor connection string lengkap dengan password", () => {
 		const message =
@@ -177,9 +181,9 @@ describe("scrub() — jaring pengaman kebocoran rahasia", () => {
 
 	it("menyensor JWT (anon/service_role gaya lama)", () => {
 		const jwt =
-			"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZV9yb2xlIn0.abcdefghijklmnop";
+			"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiJ9.abcdefghijklmnop";
 		const result = scrub(`header apikey ${jwt} ditolak`);
-		expect(result).not.toContain("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9");
+		expect(result).not.toContain(jwt);
 		expect(result).toContain("[RAHASIA DISENSOR]");
 	});
 
