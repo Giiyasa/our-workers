@@ -74,6 +74,13 @@ describe("pencocokan jalur berparameter", () => {
 		expect(res.status).toBe(400);
 	});
 
+	it("id bukan angka murni juga ditolak (`620abc`, `-1`, `0`)", async () => {
+		for (const bad of ["620abc", "-1", "0", "62 0", "99999999999999999"]) {
+			const res = await SELF.fetch(`${BASE}/api/games/${encodeURIComponent(bad)}`);
+			expect({ bad, status: res.status }).toEqual({ bad, status: 400 });
+		}
+	});
+
 	it("rute statis tidak tertelan pola berparameter", async () => {
 		// Kalau `/api/games` ikut tercocokkan oleh /^\/api\/games\/([^/]+)$/,
 		// id-nya akan dibaca dari segmen setelahnya dan ditolak 400. Kenyataannya
@@ -84,11 +91,15 @@ describe("pencocokan jalur berparameter", () => {
 		expect(String(body.error)).toContain("DIRECT_URL");
 	});
 
-	it("rute sah tetap berhenti di gerbang DIRECT_URL (bukti tidak diam-diam ke DB)", async () => {
+	it("detail game TIDAK lagi menyentuh database", async () => {
+		// Sebelumnya rute ini berhenti di gerbang "DIRECT_URL belum di-set" (500).
+		// Sekarang sumbernya Steam Store, jadi responsnya tidak boleh berupa galat
+		// konfigurasi database. Status 200 kalau Steam menjawab, 404 kalau appid
+		// tidak dikenal, dan 502 kalau tes berjalan tanpa jaringan.
 		const res = await SELF.fetch(`${BASE}/api/games/620`);
-		expect(res.status).toBe(500);
+		expect([200, 404, 502]).toContain(res.status);
 		const body = (await res.json()) as Record<string, unknown>;
-		expect(String(body.error)).toContain("DIRECT_URL");
+		expect(String(body.error ?? "")).not.toContain("DIRECT_URL");
 	});
 });
 

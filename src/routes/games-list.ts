@@ -23,6 +23,12 @@
  * Sedangkan `search` berbeda: satu kata kunci dicocokkan ke beberapa kolom
  * sekaligus (game_name ATAU description ATAU genre ATAU category ATAU tags).
  *
+ * GAMBAR (header_image): tiap game di halaman ini dicarikan gambar header
+ * lewat Steam Store (appdetails) memakai `game_id` sebagai appid Steam.
+ * Ambilnya paralel dengan batas, di-cache 24 jam di tepi Cloudflare, dan
+ * gagal = `header_image: null` (daftar game tidak pernah ikut gagal).
+ * Rinciannya di src/lib/steam.ts.
+ *
  * Tidak butuh token: hanya membaca kolom ringkas.
  */
 
@@ -38,6 +44,7 @@ import {
 } from "../config";
 import { json } from "../lib/http";
 import { escapeLike, readBool, readInt, readList } from "../lib/params";
+import { fetchHeaderImages } from "../lib/steam";
 import { shapeGame } from "../shape";
 import type { DbRoute } from "../lib/types";
 
@@ -174,8 +181,21 @@ export const gamesListRoute: DbRoute<ListInput> = {
 		`;
 
 		const hasMore = rows.length > pageSize;
-		const data = (hasMore ? rows.slice(0, pageSize) : rows).map((row) =>
-			shapeGame(row, full),
+		// Baris ke-(pageSize+1) cuma penanda "masih ada halaman berikutnya" —
+		// jangan ikut dikirimi Steam permintaan gambar.
+		const pageRows = hasMore ? rows.slice(0, pageSize) : rows;
+
+		// header_image diambil dari Steam untuk game di HALAMAN INI saja
+		// (maksimum pageSize), diparalel dengan batas di config. Steam lambat
+		// atau mati? Semua gambar jadi null, daftar game tetap terkirim.
+		const headerImages = await fetchHeaderImages(pageRows.map((row) => row.game_id));
+
+		const data = pageRows.map((row) =>
+			shapeGame(
+				row,
+				full,
+				headerImages.get(Number(row.game_id)) ?? null,
+			),
 		);
 		const totalPages = Math.max(1, Math.ceil(total / pageSize));
 

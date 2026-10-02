@@ -18,8 +18,19 @@ function tryParseJson(text: unknown): unknown {
 /**
  * `asset.has_asset` berasal dari asset_game_id: kalau game belum punya asset
  * sama sekali, kolom asset yang lain pasti null semua.
+ *
+ * `headerImage` diambil terpisah dari Steam (lihat lib/steam.ts) dan bukan
+ * bagian dari hasil JOIN. Nilai bawaan `null` supaya pemanggil yang tidak
+ * butuh gambar tetap bisa memakai fungsi ini apa adanya.
+ *
+ * Sekarang hanya GET /api/games yang memakainya — GET /api/games/:game_id
+ * mengambil datanya dari Steam Store, bukan dari join ini.
  */
-export function shapeGame(row: Record<string, any>, full: boolean) {
+export function shapeGame(
+	row: Record<string, any>,
+	full: boolean,
+	headerImage: string | null = null,
+) {
 	const hasAsset = row.asset_game_id !== null && row.asset_game_id !== undefined;
 
 	const asset: Record<string, unknown> = {
@@ -48,6 +59,8 @@ export function shapeGame(row: Record<string, any>, full: boolean) {
 		category: row.category ?? null,
 		genre: row.genre ?? null,
 		tags: row.tags ?? null,
+		// URL gambar header dari Steam Store. null kalau Steam tidak menjawab.
+		header_image: headerImage,
 		created_at: row.created_at ?? null,
 		updated_at: row.updated_at ?? null,
 		asset,

@@ -24,8 +24,9 @@
  *
  * CATATAN: kolom `previev_url_img` PERNAH ada di game_list (tertulis salah
  * ketik di DB) dan sudah dihapus dari skema. Kalau nanti dipasang lagi,
- * tambahkan kembali ke SELECT di src/routes/games-list.ts + games-detail.ts
- * DAN ke pembentuk respons di src/shape.ts.
+ * tambahkan kembali ke SELECT di src/routes/games-list.ts + pembentuk respons
+ * di src/shape.ts. (games-detail.ts sudah TIDAK membaca database — sumbernya
+ * Steam Store, lihat src/lib/steam.ts.)
  *
  * game_asset.game_id adalah PRIMARY KEY sekaligus FOREIGN KEY ke
  * game_list(game_id) ON DELETE CASCADE.
