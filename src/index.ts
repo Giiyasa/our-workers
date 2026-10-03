@@ -38,11 +38,19 @@
 
 import { createDb } from "./lib/db";
 import { checkWriteToken, fail, json, scrub } from "./lib/http";
+import { resolveAuthSecret } from "./lib/auth";
 import type { RouteDef, RouteContext } from "./lib/types";
 import { healthRoute } from "./routes/health";
 import { inspectRoute } from "./routes/inspect";
 import { gamesListRoute } from "./routes/games-list";
 import { gamesDetailRoute } from "./routes/games-detail";
+import { authLoginRoute } from "./routes/auth-login";
+import { authVerifyRoute } from "./routes/auth-verify";
+import { authResendOtpRoute } from "./routes/auth-resend-otp";
+import { authMachineRoute } from "./routes/auth-machine";
+import { authMeRoute } from "./routes/auth-me";
+import { authLogoutRoute } from "./routes/auth-logout";
+import { authRecoveryRoute } from "./routes/auth-recovery";
 
 /**
  * TABEL RUTE — satu-satunya daftar rute.
@@ -50,12 +58,25 @@ import { gamesDetailRoute } from "./routes/games-detail";
  * Menambah rute baru: buat file di src/routes/, ekspor objeknya, lalu daftarkan
  * di sini. Urutan penting: rute berparameter (`/api/games/:game_id`) harus
  * berada SETELAH rute statis supaya tidak menelan jalur statis yang mirip.
+ *
+ * Rute auth sengaja bertoken `none` — yang menjaga mereka bukan write token,
+ * melainkan pemeriksaan sesi di dalam rutenya sendiri (lib/session-guard.ts).
+ * Write token tetap dipakai untuk rute yang menyentuh data mentah / menulis
+ * tabel game.
  */
 const ROUTES: RouteDef[] = [
 	healthRoute(() => routeList()),
 	inspectRoute,
 	gamesListRoute,
 	gamesDetailRoute,
+	// --- auth: urutan tidak masalah, semuanya jalur statis -------------------
+	authLoginRoute,
+	authVerifyRoute,
+	authResendOtpRoute,
+	authMachineRoute,
+	authMeRoute,
+	authLogoutRoute,
+	authRecoveryRoute,
 ];
 
 /** Daftar rute untuk laporan GET /api/health. */
@@ -102,6 +123,18 @@ export default {
 		}
 
 		const context: RouteContext = { request, env, executionCtx: ctx, url, params };
+
+		// ------------------------------------------------------------------
+		// 1b. Peringatan konfigurasi: rute auth menandatangani token dengan
+		//     AUTH_SECRET. Kalau secret aslinya belum dipasang, nilainya masih
+		//     bawaan pengembangan — dicatat di log supaya tidak diam-diam ikut
+		//     ke produksi (health juga melaporkannya).
+		// ------------------------------------------------------------------
+		if (path.startsWith("/api/auth/") && resolveAuthSecret(env).temporary) {
+			console.warn(
+				"[auth] AUTH_SECRET belum di-set; token ditandatangani nilai pengembangan. Jalankan: wrangler secret put AUTH_SECRET",
+			);
+		}
 
 		// ------------------------------------------------------------------
 		// 2. Gerbang token: rute yang membuka data mentah (inspect) maupun

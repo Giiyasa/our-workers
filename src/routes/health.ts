@@ -10,6 +10,8 @@
  */
 
 import { DB_ENCRYPTED, DB_MODE, WORKER_NAME } from "../config";
+import { resolveAuthSecret } from "../lib/auth";
+import { mailMode } from "../lib/mail";
 import { json } from "../lib/http";
 import type { PlainRoute } from "../lib/types";
 
@@ -28,6 +30,11 @@ export function healthRoute(listRoutes: () => string[]): PlainRoute {
 				routes: listRoutes(),
 				directUrlConfigured: Boolean(ctx.env.DIRECT_URL),
 				writeTokenConfigured: Boolean(ctx.env.WRITE_TOKEN),
+				// Status konfigurasi auth. `authSecretTemporary: true` berarti
+				// AUTH_SECRET belum dipasang dan token ditandatangani nilai
+				// pengembangan — JANGAN dipakai di produksi.
+				authSecretTemporary: resolveAuthSecret(ctx.env).temporary,
+				modeEmail: mailMode(ctx.env),
 			}),
 	};
 }

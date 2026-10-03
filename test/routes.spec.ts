@@ -20,6 +20,13 @@ describe("tabel rute", () => {
 			"GET /api/db/inspect",
 			"GET /api/games",
 			"GET /api/games/:game_id",
+			"POST /api/auth/login",
+			"POST /api/auth/verify",
+			"POST /api/auth/resend-otp",
+			"POST /api/auth/machine",
+			"GET /api/auth/me",
+			"POST /api/auth/logout",
+			"POST /api/auth/recovery",
 		]);
 	});
 
