@@ -29,6 +29,24 @@ export const TABLE_OTP = "otp";
  */
 export const TABLE_RECOVERY = "recovery_user";
 
+/**
+ * Tabel pembelian + tabel kepemilikan game per user (fitur klaim invoice).
+ *
+ * Alur klaim: user mengirim `invoice_number`, worker mencocokkannya dengan
+ * `history_purchase`, lalu mengisi `user_list_game.app_id_buy`:
+ *   - role INVOICE_CLAIM_ROLE_CODE -> app_id_buy = history_purchase.game_id
+ *   - role lain                    -> app_id_buy = 0
+ * Invoice yang sudah dipakai (is_invoice_used = true) tidak bisa dipakai lagi.
+ */
+export const TABLE_HISTORY_PURCHASE = "history_purchase";
+export const TABLE_USER_LIST_GAME = "user_list_game";
+
+/** Satu-satunya access_role_code yang menuangkan game_id invoice ke app_id_buy. */
+export const INVOICE_CLAIM_ROLE_CODE = 4;
+
+/** Panjang maksimum nomor invoice yang diterima (karakter). */
+export const MAX_INVOICE_LENGTH = 64;
+
 /** Rute /api/db/inspect cuma boleh membaca tabel ini, bukan seluruh skema. */
 export const ALLOWED_TABLES = new Set([TABLE_GAME, TABLE_ASSET]);
 

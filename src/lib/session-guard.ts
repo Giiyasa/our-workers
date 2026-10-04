@@ -25,7 +25,7 @@
  * langsung menendang user ke halaman login.
  */
 
-import { DEVICE_ID_HEADER } from "../config";
+import { DEVICE_ID_HEADER, TABLE_USER } from "../config";
 import { credentialFingerprint, readAccessToken, resolveAuthSecret, tokenHash } from "./auth";
 import { readDbNow } from "./auth-store";
 import { readRecoveryDevice } from "./auth-recovery";
@@ -207,7 +207,7 @@ export async function requireSession(
 	// ------------------------------------------------------------------------
 	const rows = await sql<SessionUserRow[]>`
 		select user_id, password_hash, machine_info
-		from user where user_id = ${userId}::int8 limit 1
+		from ${sql(TABLE_USER)} where user_id = ${userId}::int8 limit 1
 	`;
 	const row = rows[0];
 	if (!row) return fail("AKUN_TIDAK_ADA");

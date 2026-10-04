@@ -51,6 +51,8 @@ import { authMachineRoute } from "./routes/auth-machine";
 import { authMeRoute } from "./routes/auth-me";
 import { authLogoutRoute } from "./routes/auth-logout";
 import { authRecoveryRoute } from "./routes/auth-recovery";
+import { claimInvoiceRoute } from "./routes/claim-invoice";
+import { accountRoute } from "./routes/account";
 
 /**
  * TABEL RUTE — satu-satunya daftar rute.
@@ -77,6 +79,10 @@ const ROUTES: RouteDef[] = [
 	authMeRoute,
 	authLogoutRoute,
 	authRecoveryRoute,
+	// --- claim invoice: jalur statis, sesi dijaga di dalam rutenya -----------
+	claimInvoiceRoute,
+	// --- account: satu GET untuk halaman Account FE (profil + owned + history)
+	accountRoute,
 ];
 
 /** Daftar rute untuk laporan GET /api/health. */
