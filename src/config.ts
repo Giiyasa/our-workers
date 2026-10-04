@@ -14,8 +14,8 @@ export const DB_MODE = "langsung (tanpa Hyperdrive)";
 /** Jalur langsung TIDAK terenkripsi — penjelasan panjang di lib/db.ts. */
 export const DB_ENCRYPTED = false;
 
-export const TABLE_GAME = "game_list";
-export const TABLE_ASSET = "game_asset";
+export const TABLE_GAME = "game_lists";
+export const TABLE_ASSET = "game_assets";
 export const TABLE_USER = "user";
 export const TABLE_OTP = "otp";
 

@@ -184,11 +184,11 @@ export const accountRoute: DbRoute<Record<string, never>> = {
 		const catalogRows: CatalogRow[] =
 			gameIdsForCatalog.length > 0
 				? await sql<CatalogRow[]>`
-					select g.game_id, g.game_name, a.game_id as asset_game_id
+					select g.app_id, g.name, a.game_id as asset_game_id
 					from ${sql(TABLE_GAME)} g
-					left join ${sql(TABLE_ASSET)} a on a.game_id = g.game_id
-					where g.game_id in ${sql(gameIdsForCatalog)}
-					order by g.game_id
+					left join ${sql(TABLE_ASSET)} a on a.game_id = g.app_id
+					where g.app_id in ${sql(gameIdsForCatalog)}
+					order by g.app_id
 				`
 				: [];
 		const catalogByName = new Map(catalogRows.map((row) => [Number(row.game_id), row]));

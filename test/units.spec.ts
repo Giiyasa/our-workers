@@ -17,81 +17,100 @@ import {
 } from "../src/lib/steam";
 import { shapeGame } from "../src/shape";
 
-describe("shapeGame() — bentuk hasil LEFT JOIN", () => {
-	const rowWithAsset = {
-		id: 1,
-		game_id: 620,
-		game_name: "Portal 2",
-		description: "teka-teki",
-		category: "action",
-		genre: "puzzle",
-		tags: "koop",
-		created_at: "2026-01-01",
-		updated_at: "2026-01-02",
-		asset_game_id: 620,
-		asset_created_at: "2026-01-01",
-		asset_updated_at: "2026-01-02",
-		asset_lua_data: "{}",
-		asset_metadata: '{"appid":10,"name":"Counter-Strike"}',
-		asset_encyription: null,
+describe("shapeGame() — bentuk baris game_list tabel baru", () => {
+	const rowFull = {
+		id: "1",
+		app_id: "10",
+		name: "Counter-Strike",
+		image: "shared.akamai.steamstatic.com/store_item_assets/steam/apps/10/header.jpg?t=1745368572",
+		description: "Play the world's number 1 online action game.",
+		genre: ["Action", "Shooter"],
+		categories: ["Multi-player", "PvP", "Online PvP"],
+		publishers: ["Valve", "Valve Corporation"],
+		release_date: "2000-11-01",
+		created_at: "2026-10-03 08:30:27.484313+00",
+		updated_at: "2026-10-03 08:30:27.484313+00",
 	};
 
-	const rowWithoutAsset = {
+	const rowMinimal = {
 		id: 2,
-		game_id: 999,
-		game_name: "Belum Punya Asset",
+		app_id: 999,
+		name: "Tanpa Gambar",
+		image: null,
 		description: null,
-		category: null,
 		genre: null,
-		tags: null,
-		created_at: null,
-		updated_at: null,
-		asset_game_id: null,
-		asset_created_at: null,
-		asset_updated_at: null,
-		asset_lua_data: null,
-		asset_metadata: null,
-		asset_encyription: null,
+		categories: null,
+		publishers: null,
+		release_date: null,
 	};
 
-	it("game dengan asset: asset.has_asset true dan game_id tetap dari game_list", () => {
-		const g = shapeGame(rowWithAsset, true);
-		expect(g.asset.has_asset).toBe(true);
-		expect(g.game_id).toBe(620);
-		expect(g.game_name).toBe("Portal 2");
-	});
-
-	it("game tanpa asset: asset.has_asset false, bukan error", () => {
-		const g = shapeGame(rowWithoutAsset, true);
-		expect(g.asset.has_asset).toBe(false);
-		expect(g.asset.metadata).toBeNull();
-	});
-
-	it("mode penuh membentuk metadata_json dari teks JSON", () => {
-		const g = shapeGame(rowWithAsset, true);
-		expect(g.asset.metadata_json).toEqual({ appid: 10, name: "Counter-Strike" });
-	});
-
-	it("mode ringkas hanya melaporkan ukuran, bukan isi", () => {
-		const g = shapeGame(
-			{ ...rowWithAsset, asset_lua_bytes: 2, asset_metadata_bytes: 33, asset_ency_bytes: null },
-			false,
+	it("kolom array jsonb tetap array, image diberi https://", () => {
+		const g = shapeGame(rowFull);
+		expect(g.app_id).toBe("10");
+		expect(g.name).toBe("Counter-Strike");
+		expect(g.genre).toEqual(["Action", "Shooter"]);
+		expect(g.categories).toEqual(["Multi-player", "PvP", "Online PvP"]);
+		expect(g.publishers).toEqual(["Valve", "Valve Corporation"]);
+		expect(g.release_date).toBe("2000-11-01");
+		expect(g.image).toBe(
+			"https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/10/header.jpg?t=1745368572",
 		);
-		expect(g.asset.metadata_bytes).toBe(33);
-		expect(g.asset.metadata).toBeUndefined();
 	});
 
-	it("metadata yang bukan JSON tidak membuat runtuh", () => {
-		const g = shapeGame({ ...rowWithAsset, asset_metadata: "{rusak" }, true);
-		expect(g.asset.metadata_json).toBeNull();
-		expect(g.asset.metadata).toBe("{rusak");
-	});
-
-	it("header_image selalu ada, null kalau tidak diberi", () => {
-		expect(shapeGame(rowWithAsset, true).header_image).toBeNull();
-		expect(shapeGame(rowWithAsset, true, "https://x/header.jpg").header_image).toBe(
-			"https://x/header.jpg",
+	it("image yang sudah punya protokol / // di depan tidak dirusak", () => {
+		expect(
+			shapeGame({ ...rowFull, image: "https://cdn.example/x.jpg" }).image,
+		).toBe("https://cdn.example/x.jpg");
+		expect(shapeGame({ ...rowFull, image: "//cdn.example/x.jpg" }).image).toBe(
+			"https://cdn.example/x.jpg",
 		);
+	});
+
+	it("kolom teks dipisah koma tetap diratakan jadi array", () => {
+		const g = shapeGame({ ...rowFull, genre: "Action, Shooter" });
+		expect(g.genre).toEqual(["Action", "Shooter"]);
+	});
+
+	it("kolom null dibiarkan null / array kosong, bukan error", () => {
+		const g = shapeGame(rowMinimal);
+		expect(g.image).toBeNull();
+		expect(g.description).toBeNull();
+		expect(g.release_date).toBeNull();
+		expect(g.genre).toEqual([]);
+		expect(g.categories).toEqual([]);
+		expect(g.publishers).toEqual([]);
+	});
+
+	it("field versi lama sekali tidak dipakai lagi", () => {
+		const g = shapeGame(rowFull);
+		expect(Object.keys(g)).not.toContain("asset");
+		expect(Object.keys(g)).not.toContain("header_image");
+		expect(Object.keys(g)).not.toContain("tags");
+	});
+
+	it("literal array Postgres (fetch_types:false) dipecah benar", () => {
+		// Bentuk nyata yang datang dari worker: kolom text[] tidak diparse
+		// driver (fetch_types:false di lib/db.ts), jadi 1 baris = 1 string.
+		const g = shapeGame({
+			...rowFull,
+			genre: '{"Adventure","Casual","Simulation"}',
+			categories: '{"Single-player","Family Sharing"}',
+			publishers: '{"Ben Koder"}',
+		});
+		expect(g.genre).toEqual(["Adventure", "Casual", "Simulation"]);
+		expect(g.categories).toEqual(["Single-player", "Family Sharing"]);
+		expect(g.publishers).toEqual(["Ben Koder"]);
+	});
+
+	it("literal array Postgres: elemen ber-koma & kutip di-escape benar", () => {
+		// "Gun, Rose" dan nama ber-kutip tidak boleh terpecah di salah tempat.
+		const g = shapeGame({
+			...rowFull,
+			genre: '{"Action","Gun, Rose"}',
+			publishers: '{"\\"Ben Koder\\""}',
+		});
+		expect(g.genre).toEqual(["Action", "Gun, Rose"]);
+		expect(g.publishers).toEqual(['"Ben Koder"']);
 	});
 });
 

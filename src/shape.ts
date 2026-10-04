@@ -5,64 +5,117 @@
  * bersarang: { ...game, asset: { has_asset, ... } }.
  */
 
-/** Baca kolom text sebagai JSON; kembalikan null kalau isinya bukan JSON. */
-function tryParseJson(text: unknown): unknown {
-	if (typeof text !== "string" || !text) return null;
-	try {
-		return JSON.parse(text);
-	} catch {
-		return null;
-	}
+
+
+/**
+ * Bentuk JSON yang dikirim ke client untuk satu baris `game_list`.
+ *
+ * Struktur tabel baru (kolom array + image + release_date) dibersihkan di SATU
+ * tempat ini supaya rute daftar tetap pendek dan client tidak perlu menebak
+ * bentuk kolom:
+ *
+ *   - `image` di DB disimpan TANPA protokol ("shared.akamai.steamstatic.com/
+ *     ..."). Untuk <img src> harus ada skema — diawali "https://" di sini.
+ *     Nilai yang sudah punya "http(s)://" dibiarkan; nilai kosong/null -> null.
+ *   - `genre`/`categories`/`publishers` bisa datang sebagai array (jsonb di-
+ *     parse otomatis driver) ATAU teks dipisah koma (kalau kolomnya teks).
+ *     Keduanya diratakan jadi array string.
+ *   - Field lain dipetakan apa adanya.
+ *
+ * Sekarang hanya GET /api/games yang memakainya — GET /api/games/:game_id
+ * mengambil datanya dari Steam Store, bukan dari tabel ini.
+ */
+
+export function shapeGame(row: Record<string, any>) {
+	return {
+		id: row.id,
+		app_id: row.app_id,
+		name: row.name ?? null,
+		image: pickCoverImage(row.image),
+		description: row.description ?? null,
+		genre: toStrArray(row.genre),
+		categories: toStrArray(row.categories),
+		publishers: toStrArray(row.publishers),
+		release_date: row.release_date ?? null,
+		created_at: row.created_at ?? null,
+		updated_at: row.updated_at ?? null,
+	};
+}
+
+/** URL sampul yang layak dipasang ke <img src>: selalu punya skema http(s). */
+export function pickCoverImage(value: unknown): string | null {
+	if (typeof value !== "string") return null;
+	const trimmed = value.trim();
+	if (!trimmed) return null;
+	if (/^https?:\/\//i.test(trimmed)) return trimmed;
+	// "//host/path" -> serap protokol halaman; di WebView tidak ada halaman
+	// http, jadi paksa https.
+	if (trimmed.startsWith("//")) return `https:${trimmed}`;
+	return `https://${trimmed}`;
 }
 
 /**
- * `asset.has_asset` berasal dari asset_game_id: kalau game belum punya asset
- * sama sekali, kolom asset yang lain pasti null semua.
+ * Kolom "array" yang bisa datang dalam 3 bentuk:
  *
- * `headerImage` diambil terpisah dari Steam (lihat lib/steam.ts) dan bukan
- * bagian dari hasil JOIN. Nilai bawaan `null` supaya pemanggil yang tidak
- * butuh gambar tetap bisa memakai fungsi ini apa adanya.
+ *   1. array JS        — driver sudah parse (jsonb atau array Postgres yang
+ *                        mapping tipenya jalan) -> pakai apa adanya.
+ *   2. teks koma       — kolom lama bertipe text ("Action, Shooter").
+ *   3. literal Postgres — `fetch_types: false` (setting lib/db.ts) membuat
+ *                        driver TIDAK mem-parse tipe array[]: barisnya datang
+ *                        sebagai SATU string `{"Action","Shooter"}`. Tanda
+ *                        kurung kurawal dibuang, elemen ber-kutip dipecah
+ *                        sesuai aturan literal array Postgres, setiap
+ *                        elemen di-unescape (\ dan ").
  *
- * Sekarang hanya GET /api/games yang memakainya — GET /api/games/:game_id
- * mengambil datanya dari Steam Store, bukan dari join ini.
+ * Semua diratakan jadi array string, terbuang yang kosong.
  */
-export function shapeGame(
-	row: Record<string, any>,
-	full: boolean,
-	headerImage: string | null = null,
-) {
-	const hasAsset = row.asset_game_id !== null && row.asset_game_id !== undefined;
-
-	const asset: Record<string, unknown> = {
-		has_asset: hasAsset,
-		created_at: row.asset_created_at ?? null,
-		updated_at: row.asset_updated_at ?? null,
-	};
-
-	if (full) {
-		asset.lua_data = row.asset_lua_data ?? null;
-		asset.metadata = row.asset_metadata ?? null;
-		// Bentuk JSON dari metadata, biar client tidak perlu parse sendiri.
-		asset.metadata_json = tryParseJson(row.asset_metadata);
-		asset.encyription = row.asset_encyription ?? null;
-	} else {
-		asset.lua_bytes = row.asset_lua_bytes ?? null;
-		asset.metadata_bytes = row.asset_metadata_bytes ?? null;
-		asset.encyription_bytes = row.asset_ency_bytes ?? null;
+export function toStrArray(value: unknown): string[] {
+	if (Array.isArray(value)) {
+		return value.filter((item): item is string => typeof item === "string");
 	}
 
-	return {
-		id: row.id,
-		game_id: row.game_id,
-		game_name: row.game_name,
-		description: row.description ?? null,
-		category: row.category ?? null,
-		genre: row.genre ?? null,
-		tags: row.tags ?? null,
-		// URL gambar header dari Steam Store. null kalau Steam tidak menjawab.
-		header_image: headerImage,
-		created_at: row.created_at ?? null,
-		updated_at: row.updated_at ?? null,
-		asset,
-	};
+	if (typeof value === "string") {
+		// Literal array Postgres: diawali "{" dan diakhiri "}".
+		if (value.startsWith("{") && value.endsWith("}")) {
+			const body = value.slice(1, -1);
+			const out: string[] = [];
+			let current = "";
+			let quoted = false;
+
+			for (let i = 0; i < body.length; i++) {
+				const char = body[i];
+
+				if (quoted) {
+					if (char === "\\" && i + 1 < body.length) {
+						current += body[i + 1];
+						i++;
+					} else if (char === '"') {
+						quoted = false;
+					} else {
+						current += char;
+					}
+					continue;
+				}
+
+				if (char === '"') {
+					quoted = true;
+				} else if (char === ",") {
+					out.push(current.trim());
+					current = "";
+				} else {
+					current += char;
+				}
+			}
+			out.push(current.trim());
+
+			return out.filter(Boolean);
+		}
+
+		return value
+			.split(",")
+			.map((item) => item.trim())
+			.filter(Boolean);
+	}
+
+	return [];
 }
