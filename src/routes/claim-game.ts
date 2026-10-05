@@ -222,3 +222,4 @@ export const claimGameRoute: DbRoute<ClaimInput> = {
 		return new Response(lua.bytes as unknown as BodyInit, { status: 200, headers });
 	},
 };
+

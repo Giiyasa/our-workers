@@ -33,19 +33,11 @@
  * `filters.tag_warning` (lihat prepare), bukan diabaikan diam-diam.
  */
 
-import {
-	DEFAULT_PAGE_SIZE,
-	MAX_FILTER_LENGTH,
-	MAX_FILTER_VALUES,
-	MAX_PAGE,
-	MAX_PAGE_SIZE,
-	MAX_SEARCH_LENGTH,
-	TABLE_GAME,
-} from "../config";
-import { json } from "../lib/http";
-import { escapeLike, readInt, readList } from "../lib/params";
-import { shapeGame } from "../shape";
-import type { DbRoute } from "../lib/types";
+import { DEFAULT_PAGE_SIZE, MAX_FILTER_LENGTH, MAX_FILTER_VALUES, MAX_PAGE, MAX_PAGE_SIZE, MAX_SEARCH_LENGTH, TABLE_ASSET, TABLE_GAME } from '../config';
+import { json } from '../lib/http';
+import { escapeLike, readInt, readList } from '../lib/params';
+import { shapeGame } from '../shape';
+import type { DbRoute } from '../lib/types';
 
 interface ListInput {
 	page: number;
@@ -57,38 +49,23 @@ interface ListInput {
 }
 
 export const gamesListRoute: DbRoute<ListInput> = {
-	method: "GET",
-	path: "/api/games",
-	token: "none",
+	method: 'GET',
+	path: '/api/games',
+	token: 'none',
 	requiresDb: true,
 	prepare: ({ url }) => {
 		const params = url.searchParams;
-		const genres = readList(
-			params.getAll("genre"),
-			MAX_FILTER_VALUES,
-			MAX_FILTER_LENGTH,
-		);
-		const categories = readList(
-			params.getAll("category"),
-			MAX_FILTER_VALUES,
-			MAX_FILTER_LENGTH,
-		);
+		const genres = readList(params.getAll('genre'), MAX_FILTER_VALUES, MAX_FILTER_LENGTH);
+		const categories = readList(params.getAll('category'), MAX_FILTER_VALUES, MAX_FILTER_LENGTH);
 		// Param versi lama yang kolomnya sudah hilang: diterima, dibalas
 		// dengan peringatan, bukan diabaikan diam-diam.
-		const tagWarning = params.getAll("tags").length
-			? "Param ?tags sudah tidak didukung — kolom tags hilang dari tabel game_list."
-			: null;
+		const tagWarning = params.getAll('tags').length ? 'Param ?tags sudah tidak didukung — kolom tags hilang dari tabel game_list.' : null;
 
 		return {
 			input: {
-				page: readInt(params.get("page"), 1, 1, MAX_PAGE),
-				pageSize: readInt(
-					params.get("page_size"),
-					DEFAULT_PAGE_SIZE,
-					1,
-					MAX_PAGE_SIZE,
-				),
-				search: (params.get("search") ?? "").trim().slice(0, MAX_SEARCH_LENGTH),
+				page: readInt(params.get('page'), 1, 1, MAX_PAGE),
+				pageSize: readInt(params.get('page_size'), DEFAULT_PAGE_SIZE, 1, MAX_PAGE_SIZE),
+				search: (params.get('search') ?? '').trim().slice(0, MAX_SEARCH_LENGTH),
 				genres,
 				categories,
 				tagWarning,
@@ -113,26 +90,15 @@ export const gamesListRoute: DbRoute<ListInput> = {
 		// genre cukup), sesuai semantik filter lama. Nilai diparameterisasi
 		// sebagai teks biasa; driver tidak perlu memetakan tipe array.
 		if (genres.length > 0) {
-			const genreConditions = genres.map(
-				(genre) => sql`${genre} = any(g.genre)`,
-			);
-			conditions.push(
-				sql`(${genreConditions.reduce((a, b) => sql`${a} or ${b}`)})`,
-			);
+			const genreConditions = genres.map((genre) => sql`${genre} = any(g.genre)`);
+			conditions.push(sql`(${genreConditions.reduce((a, b) => sql`${a} or ${b}`)})`);
 		}
 		if (categories.length > 0) {
-			const categoryConditions = categories.map(
-				(category) => sql`${category} = any(g.categories)`,
-			);
-			conditions.push(
-				sql`(${categoryConditions.reduce((a, b) => sql`${a} or ${b}`)})`,
-			);
+			const categoryConditions = categories.map((category) => sql`${category} = any(g.categories)`);
+			conditions.push(sql`(${categoryConditions.reduce((a, b) => sql`${a} or ${b}`)})`);
 		}
 
-		const where =
-			conditions.length > 0
-				? sql`where ${conditions.reduce((a, b) => sql`${a} and ${b}`)}`
-				: sql``;
+		const where = conditions.length > 0 ? sql`where ${conditions.reduce((a, b) => sql`${a} and ${b}`)}` : sql``;
 
 		// Total dihitung dengan kondisi yang sama persis, jadi angkanya
 		// konsisten dengan isi halamannya.
@@ -153,10 +119,20 @@ export const gamesListRoute: DbRoute<ListInput> = {
 		// g.id sebagai penentu seri kalau tanggalnya sama.
 		const rows = await sql`
 			select
-				g.id, g.app_id, g.name, g.image, g.description,
-				g.genre, g.categories, g.publishers, g.release_date,
-				g.created_at, g.updated_at
+				g.id,
+				g.app_id,
+				g.name,
+				g.image,
+				g.description,
+				g.genre,
+				g.categories,
+				g.publishers,
+				g.release_date,
+				g.created_at,
+				g.updated_at
 			from ${sql(TABLE_GAME)} g
+			inner join ${sql(TABLE_ASSET)} a
+				on g.app_id = a.game_id
 			${where}
 			order by g.release_date desc nulls last, g.id
 			limit ${pageSize + 1} offset ${offset}
