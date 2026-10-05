@@ -36,28 +36,18 @@
  *     owned_games: [{ app_id_buy, game_id, game_name, has_asset,
  *                     header_image, owned_since }],
  *     purchase_history: [{ id, invoice_number, game_id, role_klaim:
- *                          boolean, game_diberi: number[], 
+ *                          boolean, game_diberi: number[],
  *                          created_at, updated_at }] }
  *
  * STATUS: 401 sesi tidak sah / AKUN_TIDAK_ADA — sama dengan rute sesi lain.
  */
 
-import {
-	INVOICE_CLAIM_ROLE_CODE,
-	TABLE_ASSET,
-	TABLE_GAME,
-	TABLE_HISTORY_PURCHASE,
-	TABLE_USER_LIST_GAME,
-} from "../config";
-import { findUserById, shapeUser } from "../lib/auth-store";
-import { fail, json } from "../lib/http";
-import { fetchHeaderImages } from "../lib/steam";
-import {
-	preflightSession,
-	requireSession,
-	sessionFailStatus,
-} from "../lib/session-guard";
-import type { DbRoute } from "../lib/types";
+import { INVOICE_CLAIM_ROLE_CODE, TABLE_ASSET, TABLE_GAME, TABLE_HISTORY_PURCHASE, TABLE_USER_LIST_GAME } from '../config';
+import { findUserById, shapeUser } from '../lib/auth-store';
+import { fail, json } from '../lib/http';
+import { fetchHeaderImages } from '../lib/steam';
+import { preflightSession, requireSession, sessionFailStatus } from '../lib/session-guard';
+import type { DbRoute } from '../lib/types';
 
 /** Satu baris `user_list_game` yang dibutuhkan rute ini. */
 interface OwnedRow {
@@ -68,9 +58,9 @@ interface OwnedRow {
 
 /** Satu baris `game_list` hasil JOIN ke daftar appid milik user. */
 interface CatalogRow {
-	game_id: number;
-	game_name: string;
-	/** NULL = game belum punya asset (LEFT JOIN game_asset tidak menemukan). */
+	app_id: number;
+	name: string;
+	image: string | null;
 	asset_game_id: number | null;
 }
 
@@ -88,13 +78,13 @@ interface PurchaseRow {
 /** Date/string dari driver -> string ISO. */
 function iso(value: Date | string | null): string | null {
 	if (value instanceof Date) return value.toISOString();
-	return typeof value === "string" ? value : null;
+	return typeof value === 'string' ? value : null;
 }
 
 export const accountRoute: DbRoute<Record<string, never>> = {
-	method: "GET",
-	path: "/api/account",
-	token: "none",
+	method: 'GET',
+	path: '/api/account',
+	token: 'none',
 	requiresDb: true,
 
 	prepare: ({ request, env }) => {
@@ -106,18 +96,13 @@ export const accountRoute: DbRoute<Record<string, never>> = {
 	},
 
 	handle: async ({ request, env }, _input, sql) => {
-		const check = await requireSession(
-			sql,
-			env,
-			request,
-			request.headers.get("x-user-id"),
-		);
+		const check = await requireSession(sql, env, request, request.headers.get('x-user-id'));
 		if (!check.ok) return fail(sessionFailStatus(check.code), check.error, check.code);
 		const userId = check.session.userId;
 
 		const user = await findUserById(sql, userId);
 		if (!user) {
-			return fail(401, "Akun tidak ditemukan. Silakan login ulang.", "AKUN_TIDAK_ADA");
+			return fail(401, 'Akun tidak ditemukan. Silakan login ulang.', 'AKUN_TIDAK_ADA');
 		}
 
 		// ------------------------------------------------------------------
@@ -147,19 +132,16 @@ export const accountRoute: DbRoute<Record<string, never>> = {
 			order by app_id_buy, created_at asc
 		`;
 		const ownedIds = ownedRows.map((row) => Number(row.app_id_buy));
-
 		// ------------------------------------------------------------------
 		// Detail game untuk yang dimiliki. Kartu membutuhkan nama + sampul,
 		// jadi detailnya dipanen dari game_list untuk appid yang dimiliki.
-		// Judul yang sudah tidak ada di game_list tetap tampil sebagai
+		// Judul yang  sudah tidak ada di game_list tetap tampil sebagai
 		// kepemilikan, cuma tanpa nama (game_name null di FE).
 		// ------------------------------------------------------------------
-		const ownedGames = ownedRows.map((row) => {
-			return {
-				app_id_buy: row.app_id_buy,
-				owned_since: iso(row.created_at),
-			};
-		});
+		const ownedGames = ownedRows.map((row) => ({
+			app_id_buy: Number(row.app_id_buy),
+			owned_since: iso(row.created_at),
+		}));
 
 		// purchase history: baris is_invoice_used = true, dicocokkan dengan
 		// kepemilikan yang sama (app_id_buy = game_id). Belum punya game apa
@@ -184,27 +166,30 @@ export const accountRoute: DbRoute<Record<string, never>> = {
 		const catalogRows: CatalogRow[] =
 			gameIdsForCatalog.length > 0
 				? await sql<CatalogRow[]>`
-					select g.app_id, g.name, a.game_id as asset_game_id
+					select g.app_id, g.name, g.image, a.game_id as asset_game_id
 					from ${sql(TABLE_GAME)} g
 					left join ${sql(TABLE_ASSET)} a on a.game_id = g.app_id
 					where g.app_id in ${sql(gameIdsForCatalog)}
 					order by g.app_id
 				`
 				: [];
-		const catalogByName = new Map(catalogRows.map((row) => [Number(row.game_id), row]));
+		const catalogByName = new Map(catalogRows.map((row) => [Number(row.app_id), row]));
 
 		// header_image dari Steam untuk kepemilikan — kebijakan sama dengan
 		// daftar katalog: gagal fetch = null tanpa membuat rute gagal.
 		const headerImages = await fetchHeaderImages(gameIdsForCatalog);
+		const catalogById = new Map(catalogRows.map((row) => [Number(row.app_id), row]));
 
 		const owned = ownedGames.map((row) => {
-			const game = catalogByName.get(row.app_id_buy);
+			const appId = Number(row.app_id_buy);
+			const game = catalogById.get(appId);
+
 			return {
-				app_id_buy: row.app_id_buy,
-				game_id: game?.game_id ?? null,
-				game_name: game?.game_name ?? null,
+				app_id_buy: appId,
+				game_id: game ? Number(game.app_id) : null,
+				game_name: game?.name ?? null,
+				game_image: game?.image ?? null,
 				has_asset: game?.asset_game_id != null,
-				header_image: headerImages.get(row.app_id_buy) ?? null,
 				owned_since: row.owned_since,
 			};
 		});
@@ -220,7 +205,7 @@ export const accountRoute: DbRoute<Record<string, never>> = {
 			id: row.id,
 			invoice_number: row.invoice_number,
 			game_id: row.game_id,
-			game_name: catalogByName.get(row.game_id ?? 0)?.game_name ?? null,
+			game_name: catalogByName.get(row.game_id ?? 0)?.name ?? null,
 			created_at: iso(row.created_at),
 			updated_at: iso(row.updated_at),
 		}));

@@ -348,3 +348,13 @@ export const STEAM_DETAIL_CACHE_TTL_S = 86_400;
 
 /** Panjang maksimum URL gambar (header/screenshot) yang diterima dari Steam. */
 export const MAX_IMAGE_URL_LENGTH = 512;
+
+// ---------------------------------------------------------------------------
+// Claim game (POST /api/claim-game) + penyimpanan file R2
+// ---------------------------------------------------------------------------
+
+/** Batas ukuran file .lua yang diterima dari R2 dan diteruskan ke client (byte). */
+export const MAX_LUA_BYTES = 1_000_000;
+
+/** Umur presigned URL R2 (detik) — dipakai worker untuk satu fetch sendiri. */
+export const R2_PRESIGN_TTL_S = 300;

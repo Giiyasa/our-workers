@@ -27,6 +27,7 @@
 import {
 	INVOICE_CLAIM_ROLE_CODE,
 	MAX_INVOICE_LENGTH,
+	TABLE_GAME,
 	TABLE_HISTORY_PURCHASE,
 	TABLE_USER_LIST_GAME,
 } from "../config";
@@ -52,6 +53,14 @@ interface InvoiceRow {
 	game_id: number | null;
 	/** Nullable bool: null/false = belum dipakai. */
 	is_invoice_used: boolean | null;
+}
+
+/** Satu baris `game` yang dibutuhkan rute ini. */
+interface GameRow {
+	/** int4 -> number. */
+	app_id: number;
+	/** string. */
+	name: string;
 }
 
 export const claimInvoiceRoute: DbRoute<ClaimInput> = {
@@ -133,6 +142,16 @@ export const claimInvoiceRoute: DbRoute<ClaimInput> = {
 		}
 		const appIdBuy = isRolePopulate ? Number(invoice.game_id) : 0;
 
+		/** Data game yang dimiliki oleh user. */
+		const dataGame = await sql<GameRow[]>`
+		select app_id, name from ${sql(TABLE_GAME)}
+		where app_id = ${appIdBuy}
+		limit 1
+	`;
+
+	const nameGame = dataGame[0]?.name ?? null;
+
+
 		// ---------------------------------------------------------------
 		// SATU transaksi: tandai invoice + insert baris kepemilikan.
 		// `is not true` menangkap dua-duanya: false DAN null (kolom nullable).
@@ -164,6 +183,7 @@ export const claimInvoiceRoute: DbRoute<ClaimInput> = {
 			ok: true,
 			user_id: userId,
 			invoice_number: invoiceNumber,
+			name_game: nameGame,
 			access_role_code: user.access_role_code,
 			app_id_buy: appIdBuy,
 			is_from_free_claim: false,

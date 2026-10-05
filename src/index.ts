@@ -52,6 +52,7 @@ import { authMeRoute } from "./routes/auth-me";
 import { authLogoutRoute } from "./routes/auth-logout";
 import { authRecoveryRoute } from "./routes/auth-recovery";
 import { claimInvoiceRoute } from "./routes/claim-invoice";
+import { claimGameRoute } from "./routes/claim-game";
 import { accountRoute } from "./routes/account";
 
 /**
@@ -81,6 +82,8 @@ const ROUTES: RouteDef[] = [
 	authRecoveryRoute,
 	// --- claim invoice: jalur statis, sesi dijaga di dalam rutenya -----------
 	claimInvoiceRoute,
+	// --- claim game: jalur statis, sesi dijaga di dalam rutenya -------------
+	claimGameRoute,
 	// --- account: satu GET untuk halaman Account FE (profil + owned + history)
 	accountRoute,
 ];

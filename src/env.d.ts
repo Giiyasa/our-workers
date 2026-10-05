@@ -26,4 +26,12 @@ interface Env {
 	MAIL_FROM?: string;
 	/** URL webhook pengiriman email milik sendiri (cadangan Resend). */
 	MAIL_WEBHOOK_URL?: string;
+	/** Endpoint S3 R2, mis. "https://<14-digit>.r2.cloudflarestorage.com". */
+	R2_ENDPOINT?: string;
+	/** Access key ID R2 untuk endpoint di atas (dipakai rute claim-game). */
+	R2_ACCESS_KEY_ID?: string;
+	/** Secret access key R2. Produksi: wrangler secret put; lokal: .dev.vars. */
+	R2_SECRET_ACCESS_KEY?: string;
+	/** Bucket R2 penyimpanan file .lua (key-nya "lua/<app_id>.lua"). */
+	R2_BUCKET?: string;
 }
