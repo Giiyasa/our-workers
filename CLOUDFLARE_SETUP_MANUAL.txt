@@ -1,0 +1,68 @@
+SETUP CLAIM ASSET MELALUI DASHBOARD CLOUDFLARE
+
+1. BUAT QUEUE
+   Buka dashboard Cloudflare, cari menu Queues.
+   Pilih Create queue dan buat dua antrean:
+   - game-asset-fetch
+   - game-asset-fetch-dlq
+
+2. TAMBAHKAN SECRETS
+   Buka Workers & Pages > worker-toko > Settings > Variables and Secrets.
+   Pilih Add, lalu pilih tipe Secret untuk setiap nilai berikut:
+
+   RYUU_AUTH_CODE
+   Isi dengan key Ryuu saja, bukan URL lengkap.
+
+   HUBCAP_API_KEYS
+   Isi dengan JSON daftar key Hubcap, contoh:
+   [
+     {"id":"key_01","key":"API_KEY_AKUN_1"},
+     {"id":"key_02","key":"API_KEY_AKUN_2"}
+   ]
+   Tambahkan akun berikutnya sampai seluruh key terdaftar.
+   Setiap id harus berbeda. Ganti placeholder dengan key asli.
+
+   ASSET_MASTER_KEY_HEX
+   Isi dengan master key enkripsi milikmu: 64 karakter hex.
+   Jangan tambahkan awalan \x, tanda kutip, atau spasi.
+
+   Simpan secrets di pengaturan runtime Worker, bukan Build variables.
+
+3. HUBUNGKAN QUEUE KE WORKER
+   Jika deployment memakai Wrangler, konfigurasi langkah 3 dan 4 sudah
+   tersedia di wrangler.jsonc dan diterapkan saat deployment.
+
+   Jika mengatur binding secara manual melalui dashboard:
+   Buka Workers & Pages > worker-toko > Bindings > Add binding.
+   Pilih Queue dan isi:
+   - Variable name: ASSET_QUEUE
+   - Queue: game-asset-fetch
+
+4. PASANG CONSUMER
+   Buka Queue game-asset-fetch dan tambahkan consumer Worker worker-toko.
+   Atur pengaturan consumer sesuai konfigurasi berikut:
+   - Batch size: 1
+   - Batch timeout: 0 detik
+   - Maximum retries: 5
+   - Maximum concurrency: 4
+   - Dead-letter queue: game-asset-fetch-dlq
+
+   Queue utama mengirim pekerjaan ke Worker yang sama.
+   Queue DLQ menampung pesan yang gagal setelah retry habis.
+   DLQ tidak perlu binding producer tambahan untuk alur ini.
+
+5. JALANKAN PATCH SUPABASE SECARA MANUAL
+   Buka Supabase SQL Editor.
+   Salin dan jalankan isi supabase/CLAIM_ASSET_PATCH.sql.
+   Patch mengasumsikan game_asset_jobs sudah ada dari migration sebelumnya.
+
+6. DEPLOY KODE TERBARU
+   Perubahan kode lokal belum otomatis masuk ke Cloudflare.
+   Deploy versi terbaru menggunakan alur deployment proyekmu.
+   Jika memakai integrasi Git, perubahan harus masuk ke branch deployment.
+   Membuat Queue dan secrets saja belum mengaktifkan alur claim terbaru.
+
+REFERENSI
+https://developers.cloudflare.com/queues/get-started/
+https://developers.cloudflare.com/queues/configuration/configure-queues/
+https://developers.cloudflare.com/workers/configuration/secrets/

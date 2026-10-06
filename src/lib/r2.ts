@@ -187,6 +187,7 @@ export async function fetchR2Lua(
 ): Promise<{ ok: true; bytes: Uint8Array } | { ok: false; status: number; error: string }> {
 	const config = readR2Config(env);
 	if (!config) {
+		console.error("r2_read_failed", { appId, stage: "configuration", reason: "missing_configuration" });
 		return {
 			ok: false,
 			status: 503,
@@ -194,14 +195,31 @@ export async function fetchR2Lua(
 		};
 	}
 
-	const url = await presignR2Get(config, objectKey, R2_PRESIGN_TTL_S);
-
-	const response = await fetch(url, { signal: AbortSignal.timeout(8000), redirect: "error" });
+	let stage = "signing";
+	const startedAt = Date.now();
+	let response: Response;
+	try {
+		const url = await presignR2Get(config, objectKey, R2_PRESIGN_TTL_S);
+		stage = "fetch";
+		response = await fetch(url, { signal: AbortSignal.timeout(8000), redirect: "error" });
+	} catch (error) {
+		// Do not log error messages/stacks: fetch errors can contain signed URLs.
+		console.error("r2_read_failed", {
+			appId, stage, elapsedMs: Date.now() - startedAt,
+			reason: error instanceof DOMException && error.name === "TimeoutError" ? "timeout"
+				: error instanceof DOMException && error.name === "AbortError" ? "aborted"
+				: error instanceof TypeError ? "type_or_network_error" : "unexpected_error",
+		});
+		throw error;
+	}
 	if (response.status === 404) {
 		await response.body?.cancel();
 		return { ok: false, status: 404, error: "File game ini belum tersedia di penyimpanan." };
 	}
 	if (!response.ok) {
+		console.error("r2_read_failed", {
+			appId, stage: "http", status: response.status, elapsedMs: Date.now() - startedAt,
+		});
 		await response.body?.cancel();
 		return {
 			ok: false,
@@ -212,7 +230,15 @@ export async function fetchR2Lua(
 
 	// Batas ukuran: pengguna akhir tidak butuh file .lua gigabyte-an; kalau
 	// lebih besar dari MAX_LUA_BYTES, hentikan (padahal isi realnya ±1KB).
-	return { ok: true, bytes: await readLua(response) };
+	try {
+		return { ok: true, bytes: await readLua(response) };
+	} catch (error) {
+		console.error("r2_read_failed", {
+			appId, stage: "read_or_validate", status: response.status, elapsedMs: Date.now() - startedAt,
+			reason: error instanceof TypeError ? "invalid_encoding_or_read_error" : "invalid_lua_or_read_error",
+		});
+		throw error;
+	}
 }
 
 /** Unique object keys fence uploads from expired job owners. */
