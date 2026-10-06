@@ -201,11 +201,13 @@ export async function fetchR2Lua(
 	try {
 		const url = await presignR2Get(config, objectKey, R2_PRESIGN_TTL_S);
 		stage = "fetch";
-		response = await fetch(url, { signal: AbortSignal.timeout(8000), redirect: "error" });
+		// Return redirects as HTTP responses so their status is visible in diagnostics.
+		response = await fetch(url, { signal: AbortSignal.timeout(8000), redirect: "manual" });
 	} catch (error) {
 		// Do not log error messages/stacks: fetch errors can contain signed URLs.
 		console.error("r2_read_failed", {
 			appId, stage, elapsedMs: Date.now() - startedAt,
+			detail: classifyR2FetchError(error),
 			reason: error instanceof DOMException && error.name === "TimeoutError" ? "timeout"
 				: error instanceof DOMException && error.name === "AbortError" ? "aborted"
 				: error instanceof TypeError ? "type_or_network_error" : "unexpected_error",
@@ -250,8 +252,20 @@ export async function uploadR2Lua(env: Env, objectKey: string, bytes: Uint8Array
 	const response = await fetch(url, {
 		method: "PUT", body: bytes as Uint8Array<ArrayBuffer>,
 		headers: { "content-type": "application/octet-stream" },
-		signal: AbortSignal.timeout(8000), redirect: "error",
+		signal: AbortSignal.timeout(8000), redirect: "manual",
 	});
 	await response.body?.cancel();
 	if (!response.ok) throw new Error("Upload file R2 gagal.");
+}
+
+/** Fixed labels only; never emit messages containing credentials or signed URLs. */
+function classifyR2FetchError(error: unknown): string {
+	const message = error instanceof Error ? error.message.toLowerCase() : "";
+	if (message.includes("redirect")) return "redirect_error";
+	if (message.includes("url") && /invalid|parse|malformed/.test(message)) return "invalid_url";
+	if (/resolve|dns/.test(message)) return "dns_error";
+	if (/certificate|tls|ssl/.test(message)) return "tls_error";
+	if (/unsupported|not supported|not implemented/.test(message)) return "unsupported_request_option";
+	if (/network|connection/.test(message)) return "network_error";
+	return "unclassified";
 }
