@@ -66,6 +66,36 @@ export const MAX_PAGE = 10_000;
 /** Panjang maksimum kata kunci `?search=`. */
 export const MAX_SEARCH_LENGTH = 100;
 
+/**
+ * Pakai jalur pencarian ternormalisasi (kolom `search_key` + index trigram).
+ *
+ * Kolomnya dibuat oleh supabase/GAMES_LIST_SEARCH_PATCH.sql — flag ini hanya
+ * boleh `true` SETELAH SQL itu dijalankan di database yang dituju, karena
+ * kalau kolomnya belum ada, SEMUA pencarian akan gagal (kolom tak dikenal).
+ * Set `false` untuk kembali ke `name ilike` biasa (lama & tanpa toleransi
+ * typo) tanpa perlu mengubah kode rute.
+ */
+export const SEARCH_USE_NORMALIZED_KEY = true;
+
+/**
+ * Anggaran waktu (ms) untuk query `count(*)` di GET /api/games.
+ *
+ * Kalau lewat anggaran, respons tetap dikirim dengan `total` perkiraan
+ * (dihitung dari posisi halaman) dan `total_approximate: true` — lebih baik
+ * daripada membiarkan user menunggu count yang butuh scan 180 ribu baris.
+ */
+export const COUNT_BUDGET_MS = 1500;
+
+/**
+ * Ambang word_similarity untuk lapis "typo di dalam frasa" (lapis 3).
+ *
+ * 0.55 artinya sebagian besar trigram kata kunci harus muncul di suatu
+ * bagian nama: "spider an" masih cocok dengan "spiderman" (≈0.8), tapi
+ * "spider monkey" (≈0.3) tidak lolos. Naikkan kalau hasil pencarian terasa
+ * terlalu longgar, turunkan kalau ada typo yang lolos.
+ */
+export const WORD_SIMILARITY_MIN = 0.45;
+
 /** Batas jumlah nilai untuk filter multi-nilai (category/genre/tags). */
 export const MAX_FILTER_VALUES = 50;
 

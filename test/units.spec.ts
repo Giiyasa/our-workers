@@ -16,6 +16,7 @@ import {
 	toSteamAppId,
 } from "../src/lib/steam";
 import { shapeGame } from "../src/shape";
+import { normalizeSearchKey } from "../src/lib/search";
 
 describe("shapeGame() — bentuk baris game_list tabel baru", () => {
 	const rowFull = {
@@ -518,5 +519,29 @@ describe("scrub() — jaring pengaman kebocoran rahasia", () => {
 		expect(scrub(new Error('relation "game_list" does not exist'))).toContain(
 			"does not exist",
 		);
+	});
+});
+
+describe("normalizeSearchKey() — kunci pencarian tahan beda penulisan", () => {
+	it("membuang tanda hubung, titik dua, apostrof, dan spasi", () => {
+		expect(normalizeSearchKey("Spider-Man")).toBe("spiderman");
+		expect(normalizeSearchKey("The Witcher 3: Wild Hunt")).toBe("thewitcher3wildhunt");
+		expect(normalizeSearchKey("Marvel's Spider-Man")).toBe("marvelsspiderman");
+	});
+
+	it("menyamakan penulisan yang berbeda menjadi kunci yang SAMA", () => {
+		expect(normalizeSearchKey("spider-man")).toBe(normalizeSearchKey("SpiderMan"));
+		expect(normalizeSearchKey("witcher 3")).toBe(normalizeSearchKey("Witcher-3"));
+	});
+
+	it("membuang tanda diakritik", () => {
+		expect(normalizeSearchKey("Pokémon")).toBe("pokemon");
+		expect(normalizeSearchKey("Café")).toBe("cafe");
+	});
+
+	it("mengembalikan string kosong untuk input kosong/tanpa huruf-angka", () => {
+		expect(normalizeSearchKey("")).toBe("");
+		expect(normalizeSearchKey("   ")).toBe("");
+		expect(normalizeSearchKey("!!!")).toBe("");
 	});
 });
