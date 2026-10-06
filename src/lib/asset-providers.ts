@@ -5,6 +5,27 @@ export class AssetFailure extends Error {
 	constructor(public code: string, message: string, public retrySeconds = 60) { super(message); }
 }
 
+async function providerRequest(provider: string, operation: string, url: string | URL, options: RequestInit): Promise<Response> {
+	const startedAt = Date.now();
+	try {
+		// Never follow redirects with provider credentials; expose their HTTP status.
+		const response = await fetch(url, { ...options, redirect: "manual" });
+		console.info("provider_response", { provider, operation, status: response.status });
+		return response;
+	} catch (error) {
+		const message = error instanceof Error ? error.message.toLowerCase() : "";
+		const detail = message.includes("redirect") ? "redirect_error"
+			: /unsupported|not supported|not implemented/.test(message) ? "unsupported_request_option"
+			: /resolve|dns/.test(message) ? "dns_error"
+			: /certificate|tls|ssl/.test(message) ? "tls_error"
+			: /timeout|timed out/.test(message) ? "timeout"
+			: /network|connection/.test(message) ? "network_error" : "unclassified";
+		// Fixed labels only: messages and URLs can contain bearer tokens/auth_code.
+		console.error("provider_request_failed", { provider, operation, detail, elapsedMs: Date.now() - startedAt });
+		throw new AssetFailure("PROVIDER_UNAVAILABLE", `${provider === "ryuu" ? "Provider 2" : "Provider 3"} sementara gagal dihubungi.`);
+	}
+}
+
 /** Bounded read; never save HTML/JSON errors as a Lua file. */
 export async function readLua(response: Response): Promise<Uint8Array> {
 	if (!response.body) throw new AssetFailure("PROVIDER_BAD_FILE", "Provider tidak mengirim file Lua.");
@@ -111,7 +132,7 @@ async function hubcap(sql: Sql, env: Env, gameId: number): Promise<Uint8Array | 
 		});
 		if (!reserved.length) continue;
 		try {
-			const response = await fetch(`https://hubcapmanifest.com/api/v1/lua/${gameId}`, {
+			const response = await providerRequest("hubcap", "lua", `https://hubcapmanifest.com/api/v1/lua/${gameId}`, {
 				headers: { Authorization: `Bearer ${config.key}` }, signal: AbortSignal.timeout(8000), redirect: "error",
 			});
 			if (response.status === 404) { await response.body?.cancel(); return null; }
@@ -152,7 +173,7 @@ export async function fetchProviderLua(sql: Sql, env: Env, gameId: number): Prom
 	const url = new URL("https://generator.ryuu.lol/resellerlua");
 	url.searchParams.set("appid", String(gameId));
 	url.searchParams.set("auth_code", env.RYUU_AUTH_CODE);
-	const response = await fetch(url, { signal: AbortSignal.timeout(8000), redirect: "error" });
+	const response = await providerRequest("ryuu", "lua", url, { signal: AbortSignal.timeout(8000) });
 	if (response.status !== 404) {
 		if (!response.ok) { await response.body?.cancel(); throw new AssetFailure("PROVIDER_UNAVAILABLE", "Provider 2 sedang tidak dapat dihubungi."); }
 		return { bytes: await readLua(response), source: "provider_2" };
