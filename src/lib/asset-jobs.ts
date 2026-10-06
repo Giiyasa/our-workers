@@ -52,6 +52,7 @@ export async function consumeAssetJob(message: AssetMessage, env: Env): Promise<
 				and request_token = ${message.requestToken}::uuid`;
 			return current[0]?.status === "processing" ? "busy" : "done";
 		}
+		let stage = "database_read";
 		try {
 			let bytes: Uint8Array | undefined;
 			let source = "database";
@@ -63,13 +64,17 @@ export async function consumeAssetJob(message: AssetMessage, env: Env): Promise<
 				} catch { /* Invalid/unsupported asset needs provider fallback. */ }
 			}
 			if (!bytes) {
+				stage = "provider_fetch";
 				const found = await fetchProviderLua(sql, env, message.gameId);
 				bytes = found.bytes; source = found.source;
 			}
+			stage = "encrypt";
 			const blob = await encryptAsset(bytes, env.ASSET_MASTER_KEY_HEX);
 			const objectKey = `lua/${message.gameId}/${token}.lua`;
 			// Upload is immutable per lease; stale consumers cannot overwrite the current file.
+			stage = "r2_upload";
 			await uploadR2Lua(env, objectKey, bytes);
+			stage = "database_publish";
 			await sql.begin(async (tx) => {
 				const locked = await tx`select game_id from game_asset_jobs where game_id = ${message.gameId}::bigint
 					and lease_token = ${token}::uuid and status = 'processing' and lease_expires_at > now() for update`;
@@ -77,13 +82,19 @@ export async function consumeAssetJob(message: AssetMessage, env: Env): Promise<
 				const hex = Array.from(blob, (byte) => byte.toString(16).padStart(2, "0")).join("");
 				await tx`insert into game_assets (game_id, lua_data, encryption_version)
 					values (${message.gameId}::bigint, decode(${hex}, 'hex'), 1)
-					on conflict (game_id) do update set lua_data = excluded.lua_data, encryption_version = 1, updated_at = now()`;
+					on conflict (game_id) do update set lua_data = excluded.lua_data, encryption_version = 1`;
 				await tx`update game_asset_jobs set status = 'ready', r2_object_key = ${objectKey}, last_provider = ${source},
 					error_code = null, error_message = null, next_retry_at = null,
 					lease_token = null, lease_expires_at = null, updated_at = now() where game_id = ${message.gameId}::bigint`;
 			});
 		} catch (error) {
 			const known = error instanceof AssetFailure;
+			const rawCode = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "";
+			console.error("asset_job_failed", {
+				appId: message.gameId, stage,
+				code: known ? error.code : /^[A-Z0-9]{5}$/.test(rawCode) ? rawCode : "ASSET_FETCH_FAILED",
+				reason: error instanceof TypeError ? "type_or_network_error" : "job_error",
+			});
 			await sql`update game_asset_jobs set status = ${known && error.code === "ASSET_NOT_FOUND" ? "not_found" : "failed"},
 				error_code = ${known ? error.code : "ASSET_FETCH_FAILED"},
 				error_message = ${known ? error.message : "Persiapan asset gagal. Coba lagi nanti."},
