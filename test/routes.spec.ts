@@ -29,6 +29,7 @@ describe("tabel rute", () => {
 			"POST /api/auth/recovery",
 			"POST /api/claim-invoice",
 			"POST /api/claim-game",
+			"GET /api/claim/status/:app_id",
 			"GET /api/account",
 		]);
 	});

@@ -33,7 +33,7 @@
  * `filters.tag_warning` (lihat prepare), bukan diabaikan diam-diam.
  */
 
-import { DEFAULT_PAGE_SIZE, MAX_FILTER_LENGTH, MAX_FILTER_VALUES, MAX_PAGE, MAX_PAGE_SIZE, MAX_SEARCH_LENGTH, TABLE_ASSET, TABLE_GAME } from '../config';
+import { DEFAULT_PAGE_SIZE, MAX_FILTER_LENGTH, MAX_FILTER_VALUES, MAX_PAGE, MAX_PAGE_SIZE, MAX_SEARCH_LENGTH, TABLE_GAME } from '../config';
 import { json } from '../lib/http';
 import { escapeLike, readInt, readList } from '../lib/params';
 import { shapeGame } from '../shape';
@@ -131,8 +131,6 @@ export const gamesListRoute: DbRoute<ListInput> = {
 				g.created_at,
 				g.updated_at
 			from ${sql(TABLE_GAME)} g
-			inner join ${sql(TABLE_ASSET)} a
-				on g.app_id = a.game_id
 			${where}
 			order by g.release_date desc nulls last, g.id
 			limit ${pageSize + 1} offset ${offset}

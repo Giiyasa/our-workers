@@ -23,3 +23,13 @@ DIRECT_URL="GANTI_DENGAN_CONNECTION_STRING"
 # Bikin acak yang panjang, contoh:
 #   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 WRITE_TOKEN="GANTI_DENGAN_TOKEN_ACAK_PANJANG"
+
+# Claim fallback: nilai rahasia hanya di .dev.vars/secret Worker.
+RYUU_AUTH_CODE="GANTI_DENGAN_KEY_PROVIDER_2"
+HUBCAP_API_KEYS='[{"id":"key_01","key":"GANTI_DENGAN_KEY_PROVIDER_3"}]'
+ASSET_MASTER_KEY_HEX="GANTI_DENGAN_MASTER_KEY_HEX_64_KARAKTER"
+# Konfigurasi R2 untuk GET/PUT file Lua:
+R2_ENDPOINT="https://ACCOUNT.r2.cloudflarestorage.com"
+R2_ACCESS_KEY_ID="GANTI_DENGAN_ACCESS_KEY"
+R2_SECRET_ACCESS_KEY="GANTI_DENGAN_SECRET_KEY"
+R2_BUCKET="GANTI_DENGAN_NAMA_BUCKET"

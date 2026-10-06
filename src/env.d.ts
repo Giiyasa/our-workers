@@ -18,6 +18,11 @@
  * `wrangler secret put <NAMA>` (produksi) atau `.dev.vars` (lokal).
  */
 interface Env {
+	ASSET_QUEUE?: Queue<{ gameId: number; requestToken: string }>;
+	RYUU_AUTH_CODE?: string;
+	/** JSON [{"id":"key_01","key":"secret"}, ...]. */
+	HUBCAP_API_KEYS?: string;
+	ASSET_MASTER_KEY_HEX?: string;
 	/** Rahasia penanda tangan token akses. WAJIB di produksi. */
 	AUTH_SECRET?: string;
 	/** API key Resend untuk mengirim email OTP. */

@@ -1,5 +1,7 @@
 # worker-toko
 
+> Implementasi claim terbaru (fallback provider 2/3, Queue, polling FE, enkripsi SGA1, dan limit 50 unduhan per sesi 12 jam) serta langkah setup manual ada di [CLAIM_SETUP.md](./CLAIM_SETUP.md). Patch lanjutan Supabase: [CLAIM_ASSET_PATCH.sql](./supabase/CLAIM_ASSET_PATCH.sql). Bagian dokumentasi katalog/struktur lama di bawah belum seluruhnya mengikuti schema terbaru.
+
 API toko game. Worker Cloudflare yang menyambung **langsung** ke Postgres
 Supabase memakai string koneksi yang disimpan sebagai secret — **tanpa
 Hyperdrive**. Aplikasi desktop tidak pernah memegang kredensial database.

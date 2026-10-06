@@ -45,7 +45,7 @@
 import { INVOICE_CLAIM_ROLE_CODE, TABLE_ASSET, TABLE_GAME, TABLE_HISTORY_PURCHASE, TABLE_USER_LIST_GAME } from '../config';
 import { findUserById, shapeUser } from '../lib/auth-store';
 import { fail, json } from '../lib/http';
-import { fetchHeaderImages } from '../lib/steam';
+import { invoiceGameReference } from '../lib/invoice-game';
 import { preflightSession, requireSession, sessionFailStatus } from '../lib/session-guard';
 import type { DbRoute } from '../lib/types';
 
@@ -99,6 +99,7 @@ export const accountRoute: DbRoute<Record<string, never>> = {
 		const check = await requireSession(sql, env, request, request.headers.get('x-user-id'));
 		if (!check.ok) return fail(sessionFailStatus(check.code), check.error, check.code);
 		const userId = check.session.userId;
+		const invoiceReference = await invoiceGameReference(sql);
 
 		const user = await findUserById(sql, userId);
 		if (!user) {
@@ -150,10 +151,13 @@ export const accountRoute: DbRoute<Record<string, never>> = {
 		const purchaseRows =
 			ownedIds.length > 0
 				? await sql<PurchaseRow[]>`
-					select hp.id, hp.invoice_number, hp.game_id, hp.created_at, hp.updated_at
+					select hp.id, hp.invoice_number, g.app_id as game_id, hp.created_at, hp.updated_at
 					from ${sql(TABLE_HISTORY_PURCHASE)} hp
+					left join ${sql(TABLE_GAME)} g on g.${sql(invoiceReference)} = hp.game_id
 					where hp.is_invoice_used = true
-						and hp.game_id in ${sql(ownedIds)}
+						and (hp.user_id = ${userId}::bigint or exists (
+							select 1 from ${sql(TABLE_USER_LIST_GAME)} ulg where ulg.user_id = ${userId}::bigint and ulg.purchase_id = hp.id
+						))
 					order by hp.created_at desc
 				`
 				: [];
@@ -166,7 +170,8 @@ export const accountRoute: DbRoute<Record<string, never>> = {
 		const catalogRows: CatalogRow[] =
 			gameIdsForCatalog.length > 0
 				? await sql<CatalogRow[]>`
-					select g.app_id, g.name, g.image, a.game_id as asset_game_id
+					select g.app_id, g.name, g.image,
+						case when coalesce(octet_length(a.lua_data), 0) > 0 or coalesce(octet_length(a.meta_data), 0) > 0 then a.game_id else null end as asset_game_id
 					from ${sql(TABLE_GAME)} g
 					left join ${sql(TABLE_ASSET)} a on a.game_id = g.app_id
 					where g.app_id in ${sql(gameIdsForCatalog)}
@@ -177,7 +182,6 @@ export const accountRoute: DbRoute<Record<string, never>> = {
 
 		// header_image dari Steam untuk kepemilikan — kebijakan sama dengan
 		// daftar katalog: gagal fetch = null tanpa membuat rute gagal.
-		const headerImages = await fetchHeaderImages(gameIdsForCatalog);
 		const catalogById = new Map(catalogRows.map((row) => [Number(row.app_id), row]));
 
 		const owned = ownedGames.map((row) => {
@@ -194,13 +198,8 @@ export const accountRoute: DbRoute<Record<string, never>> = {
 			};
 		});
 
-		// Riwayat pembelian yang DIPAKAI (is_invoice_used = true), dicocokkan
-		// ke kepemilikan lewat app_id_buy = game_id. Kaitannya nyata: klaim
-		// role 4 MENYALIN game_id invoice ke app_id_buy, jadi kecocokan itu
-		// definisi "invoice ini yang memberi game ini". Catatan jujur: tabel
-		// history_purchase tidak menyimpan user_id, jadi kaitan itu tak bisa
-		// dibuktikan per-baris — yang dijamin HANYA satu-ke-satu oleh is_invoice_used.
-		// Kelak bisa diperketat kalau tabelnya menambah kolom pemilik.
+		// Hanya invoice dengan tautan pemilik/purchase_id yang nyata.
+		// Invoice lama tanpa kedua tautan tidak ditebak berdasarkan AppID.
 		const purchaseHistory = purchaseRows.map((row) => ({
 			id: row.id,
 			invoice_number: row.invoice_number,

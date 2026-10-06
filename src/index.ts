@@ -54,6 +54,8 @@ import { authRecoveryRoute } from "./routes/auth-recovery";
 import { claimInvoiceRoute } from "./routes/claim-invoice";
 import { claimGameRoute } from "./routes/claim-game";
 import { accountRoute } from "./routes/account";
+import { claimStatusRoute } from "./routes/claim-status";
+import { consumeAssetJob, type AssetMessage } from "./lib/asset-jobs";
 
 /**
  * TABEL RUTE — satu-satunya daftar rute.
@@ -84,6 +86,7 @@ const ROUTES: RouteDef[] = [
 	claimInvoiceRoute,
 	// --- claim game: jalur statis, sesi dijaga di dalam rutenya -------------
 	claimGameRoute,
+	claimStatusRoute,
 	// --- account: satu GET untuk halaman Account FE (profil + owned + history)
 	accountRoute,
 ];
@@ -108,6 +111,15 @@ function matchRoute(
 }
 
 export default {
+	async queue(batch: MessageBatch<AssetMessage>, env: Env): Promise<void> {
+		for (const message of batch.messages) {
+			if (!Number.isSafeInteger(message.body?.gameId) || message.body.gameId <= 0 || !/^[a-f\d-]{36}$/i.test(message.body.requestToken ?? "")) { message.ack(); continue; }
+			try {
+				const result = await consumeAssetJob(message.body, env);
+				if (result === "busy") message.retry({ delaySeconds: 300 }); else message.ack();
+			} catch { message.retry({ delaySeconds: 60 }); }
+		}
+	},
 	async fetch(request, env, ctx): Promise<Response> {
 		const url = new URL(request.url);
 		const path = url.pathname;
@@ -195,4 +207,4 @@ export default {
 			return json({ ok: false, error: scrub(err) }, 500);
 		}
 	},
-} satisfies ExportedHandler<Env>;
+} satisfies ExportedHandler<Env, AssetMessage>;

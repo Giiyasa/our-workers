@@ -19,7 +19,8 @@
  * murni worker <-> R2, tidak pernah dikirim ke client.
  */
 
-import { MAX_LUA_BYTES, R2_PRESIGN_TTL_S, STEAM_MAX_APP_ID } from "../config";
+import { R2_PRESIGN_TTL_S, STEAM_MAX_APP_ID } from "../config";
+import { readLua } from "./asset-providers";
 
 /** Bagian konfigurasi R2, dipisah agar mudah diuji (fungsi murni di bawah). */
 export interface R2Config {
@@ -112,6 +113,7 @@ export async function presignR2Get(
 	config: R2Config,
 	key: string,
 	expiresSeconds: number,
+	method: "GET" | "PUT" = "GET",
 ): Promise<string> {
 	const now = new Date();
 	const amzDate = now.toISOString().replace(/[-:]/g, "").split(".")[0] + "Z"; // 20261005T073354Z
@@ -141,7 +143,7 @@ export async function presignR2Get(
 	// berisi [a-z0-9/.] sehingga aman tanpa encoding tambahan.
 	const canonicalUri = `/${config.bucket}/${key}`;
 	const canonicalRequest = [
-		"GET",
+		method,
 		canonicalUri,
 		canonicalQuery,
 		`host:${config.host}`,
@@ -181,6 +183,7 @@ export async function presignR2Get(
 export async function fetchR2Lua(
 	env: Env,
 	appId: number,
+	objectKey = luaObjectKey(appId),
 ): Promise<{ ok: true; bytes: Uint8Array } | { ok: false; status: number; error: string }> {
 	const config = readR2Config(env);
 	if (!config) {
@@ -191,13 +194,15 @@ export async function fetchR2Lua(
 		};
 	}
 
-	const url = await presignR2Get(config, luaObjectKey(appId), R2_PRESIGN_TTL_S);
+	const url = await presignR2Get(config, objectKey, R2_PRESIGN_TTL_S);
 
-	const response = await fetch(url);
+	const response = await fetch(url, { signal: AbortSignal.timeout(8000), redirect: "error" });
 	if (response.status === 404) {
+		await response.body?.cancel();
 		return { ok: false, status: 404, error: "File game ini belum tersedia di penyimpanan." };
 	}
 	if (!response.ok) {
+		await response.body?.cancel();
 		return {
 			ok: false,
 			status: 502,
@@ -207,13 +212,20 @@ export async function fetchR2Lua(
 
 	// Batas ukuran: pengguna akhir tidak butuh file .lua gigabyte-an; kalau
 	// lebih besar dari MAX_LUA_BYTES, hentikan (padahal isi realnya ±1KB).
-	const buffer = await response.arrayBuffer();
-	if (buffer.byteLength > MAX_LUA_BYTES) {
-		return {
-			ok: false,
-			status: 502,
-			error: "File melebihi batas ukuran yang diterima.",
-		};
-	}
-	return { ok: true, bytes: new Uint8Array(buffer) };
+	return { ok: true, bytes: await readLua(response) };
+}
+
+/** Unique object keys fence uploads from expired job owners. */
+export async function uploadR2Lua(env: Env, objectKey: string, bytes: Uint8Array): Promise<void> {
+	const config = readR2Config(env);
+	if (!config) throw new Error("Kredensial R2 belum dikonfigurasi.");
+	if (!/^lua\/[\d]+\/[a-f\d-]+\.lua$/i.test(objectKey)) throw new Error("Key objek tidak valid.");
+	const url = await presignR2Get(config, objectKey, R2_PRESIGN_TTL_S, "PUT");
+	const response = await fetch(url, {
+		method: "PUT", body: bytes as Uint8Array<ArrayBuffer>,
+		headers: { "content-type": "application/octet-stream" },
+		signal: AbortSignal.timeout(8000), redirect: "error",
+	});
+	await response.body?.cancel();
+	if (!response.ok) throw new Error("Upload file R2 gagal.");
 }
