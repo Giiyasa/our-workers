@@ -241,6 +241,7 @@ export const gamesListRoute: DbRoute<ListInput> = {
 			select
 				g.id,
 				g.app_id,
+				g.is_unavailable_game,
 				g.name,
 				g.image,
 				g.description,

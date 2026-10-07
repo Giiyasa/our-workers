@@ -60,3 +60,10 @@ Tes Worker memakai DIRECT_URL kosong dan provider mock. Typecheck, enkripsi SGA1
 Upload berhasil tetapi commit DB gagal dapat meninggalkan objek R2 tanpa referensi. Key immutable menjaga hasil aktif; objek tanpa referensi perlu dibersihkan terpisah dengan memeriksa pointer job, tanpa menghapus objek aktif.
 
 Referensi konfigurasi Queue: https://developers.cloudflare.com/queues/configuration/configure-queues/
+# Flag game unavailable
+
+Jalankan `supabase/GAME_UNAVAILABLE_PATCH.sql` secara manual sebelum deploy versi backend yang memakai flag ini.
+Game tetap tampil di katalog. Claim ditolak dengan `GAME_UNAVAILABLE` setelah R2, Ryuu, dan Hubcap memastikan Lua tidak ditemukan.
+Timeout, error provider, dan kuota habis tidak mengaktifkan flag.
+Penambahan Lua nonkosong ke `game_assets` membuka kembali akses; pemulihan ke R2 tetap dilakukan lewat alur job bila diperlukan.
+Untuk membuka akses secara manual tanpa asset, contoh SQL reset flag dan cooldown tersedia di bagian akhir patch.

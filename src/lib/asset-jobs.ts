@@ -86,6 +86,7 @@ export async function consumeAssetJob(message: AssetMessage, env: Env): Promise<
 				await tx`update game_asset_jobs set status = 'ready', r2_object_key = ${objectKey}, last_provider = ${source},
 					error_code = null, error_message = null, next_retry_at = null,
 					lease_token = null, lease_expires_at = null, updated_at = now() where game_id = ${message.gameId}::bigint`;
+				await tx`update game_lists set is_unavailable_game = false where app_id = ${message.gameId}::bigint`;
 			});
 		} catch (error) {
 			const known = error instanceof AssetFailure;
@@ -95,12 +96,18 @@ export async function consumeAssetJob(message: AssetMessage, env: Env): Promise<
 				code: known ? error.code : /^[A-Z0-9]{5}$/.test(rawCode) ? rawCode : "ASSET_FETCH_FAILED",
 				reason: error instanceof TypeError ? "type_or_network_error" : "job_error",
 			});
-			await sql`update game_asset_jobs set status = ${known && error.code === "ASSET_NOT_FOUND" ? "not_found" : "failed"},
-				error_code = ${known ? error.code : "ASSET_FETCH_FAILED"},
-				error_message = ${known ? error.message : "Persiapan asset gagal. Coba lagi nanti."},
-				next_retry_at = now() + ${known ? error.retrySeconds : 60} * interval '1 second',
-				lease_token = null, lease_expires_at = null, updated_at = now()
-				where game_id = ${message.gameId}::bigint and lease_token = ${token}::uuid and status = 'processing'`;
+			await sql.begin(async (tx) => {
+				const changed = await tx`update game_asset_jobs set status = ${known && error.code === "ASSET_NOT_FOUND" ? "not_found" : "failed"},
+					error_code = ${known ? error.code : "ASSET_FETCH_FAILED"},
+					error_message = ${known ? error.message : "Persiapan asset gagal. Coba lagi nanti."},
+					next_retry_at = now() + ${known ? error.retrySeconds : 60} * interval '1 second',
+					lease_token = null, lease_expires_at = null, updated_at = now()
+					where game_id = ${message.gameId}::bigint and lease_token = ${token}::uuid and status = 'processing'
+					and lease_expires_at > now() returning game_id`;
+				if (changed.length && known && error.code === "ASSET_NOT_FOUND") {
+					await tx`update game_lists set is_unavailable_game = true where app_id = ${message.gameId}::bigint`;
+				}
+			});
 		}
 		return "done";
 	} finally { await sql.end({ timeout: 5 }); }

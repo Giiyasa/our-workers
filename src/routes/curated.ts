@@ -138,6 +138,7 @@ export const curatedRoute: DbRoute = {
 			select
 				g.id,
 				g.app_id,
+				g.is_unavailable_game,
 				g.name,
 				g.image,
 				g.description,
@@ -163,6 +164,7 @@ export const curatedRoute: DbRoute = {
 			select
 				g.id,
 				g.app_id,
+				g.is_unavailable_game,
 				g.name,
 				g.image,
 				g.description,

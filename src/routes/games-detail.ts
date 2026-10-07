@@ -31,7 +31,7 @@
  *
  * TANPA TOKEN dan TANPA syarat "harus ada di database": `game_id` yang sah di
  * Steam tetapi belum ada di `game_list` tetap dibalas 200.
- * `requiresDb: false` berarti rute ini tidak pernah membuka koneksi Postgres.
+ * Detail Steam dilengkapi flag is_unavailable_game dari katalog database.
  *
  * STATUS:
  *   200 — Steam mengenali appid itu
@@ -41,21 +41,21 @@
  *   502 — Steam tidak bisa dihubungi (timeout, mati, 429/5xx)
  */
 
-import { STEAM_MAX_APP_ID } from "../config";
+import { STEAM_MAX_APP_ID, TABLE_GAME } from "../config";
 import { fail, json } from "../lib/http";
 import { fetchSteamDetail } from "../lib/steam";
-import type { PlainRoute } from "../lib/types";
+import type { DbRoute } from "../lib/types";
 
 interface Input {
 	gameId: number;
 }
 
-export const gamesDetailRoute: PlainRoute<Input> = {
+export const gamesDetailRoute: DbRoute<Input> = {
 	method: "GET",
 	path: "/api/games/:game_id",
 	pattern: /^\/api\/games\/([^/]+)$/,
 	token: "none",
-	requiresDb: false,
+	requiresDb: true,
 	prepare: ({ params }) => {
 		const rawId = params[0] ?? "";
 		// Angka murni saja: "620abc" atau "62 0" ditolak di sini, sebelum ke Steam.
@@ -69,11 +69,14 @@ export const gamesDetailRoute: PlainRoute<Input> = {
 		}
 		return { input: { gameId } };
 	},
-	handle: async ({}, { gameId }) => {
+	handle: async ({}, { gameId }, sql) => {
+		const games = await sql`select is_unavailable_game from ${sql(TABLE_GAME)} where app_id = ${gameId}::bigint limit 1`;
 		const result = await fetchSteamDetail(gameId);
 
 		if (result.ok) {
-			return json({ ok: true, data: result.detail });
+			const response = json({ ok: true, data: { ...result.detail, is_unavailable_game: games[0]?.is_unavailable_game === true } });
+			response.headers.set("cache-control", "no-store");
+			return response;
 		}
 
 		// Dua kegagalan dibedakan supaya pesannya jujur: appid tidak ada (404)

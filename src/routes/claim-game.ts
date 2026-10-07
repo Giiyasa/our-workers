@@ -34,8 +34,9 @@ export const claimGameRoute: DbRoute<{ gameId: number }> = {
 			const owned = await sql`select 1 from ${sql(TABLE_USER_LIST_GAME)} where user_id = ${userId}::bigint and app_id_buy = ${gameId}::bigint limit 1`;
 			if (!owned.length && Number(user.free_claim_game) <= 0) return fail(403, "Kuota free claim habis. Klaim invoice untuk memiliki game ini.", "FREE_CLAIM_HABIS");
 		}
-		const games = await sql`select app_id, name from ${sql(TABLE_GAME)} where app_id = ${gameId}::bigint limit 1`;
+		const games = await sql`select app_id, name, is_unavailable_game from ${sql(TABLE_GAME)} where app_id = ${gameId}::bigint limit 1`;
 		if (!games[0]) return fail(404, "Game tidak ada di katalog.", "GAME_NOT_FOUND");
+		if (games[0].is_unavailable_game === true) return fail(404, "Game belum tersedia.", "GAME_UNAVAILABLE");
 		const job = await readAssetJob(sql, gameId);
 		if (job?.status === "processing" && job.lease_live) return json({ ok: true, status: "processing", game_id: gameId, retry_after_seconds: 3 }, 202);
 		let lua;

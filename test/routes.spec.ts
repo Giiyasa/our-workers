@@ -30,6 +30,7 @@ describe("tabel rute", () => {
 			"POST /api/claim-invoice",
 			"POST /api/claim-game",
 			"GET /api/claim/status/:app_id",
+			"GET /api/curated",
 			"GET /api/account",
 		]);
 	});
@@ -102,15 +103,11 @@ describe("pencocokan jalur berparameter", () => {
 		expect(String(body.error)).toContain("DIRECT_URL");
 	});
 
-	it("detail game TIDAK lagi menyentuh database", async () => {
-		// Sebelumnya rute ini berhenti di gerbang "DIRECT_URL belum di-set" (500).
-		// Sekarang sumbernya Steam Store, jadi responsnya tidak boleh berupa galat
-		// konfigurasi database. Status 200 kalau Steam menjawab, 404 kalau appid
-		// tidak dikenal, dan 502 kalau tes berjalan tanpa jaringan.
+	it("detail game membutuhkan database untuk flag availability", async () => {
 		const res = await SELF.fetch(`${BASE}/api/games/620`);
-		expect([200, 404, 502]).toContain(res.status);
+		expect(res.status).toBe(500);
 		const body = (await res.json()) as Record<string, unknown>;
-		expect(String(body.error ?? "")).not.toContain("DIRECT_URL");
+		expect(String(body.error ?? "")).toContain("DIRECT_URL");
 	});
 });
 

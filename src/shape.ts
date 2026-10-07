@@ -30,6 +30,7 @@ export function shapeGame(row: Record<string, any>) {
 	return {
 		id: row.id,
 		app_id: row.app_id,
+		is_unavailable_game: row.is_unavailable_game === true,
 		name: row.name ?? null,
 		image: pickCoverImage(row.image),
 		description: row.description ?? null,
