@@ -55,6 +55,7 @@ import { claimInvoiceRoute } from "./routes/claim-invoice";
 import { claimGameRoute } from "./routes/claim-game";
 import { accountRoute } from "./routes/account";
 import { claimStatusRoute } from "./routes/claim-status";
+import { curatedRoute } from "./routes/curated";
 import { consumeAssetJob, type AssetMessage } from "./lib/asset-jobs";
 
 /**
@@ -87,6 +88,7 @@ const ROUTES: RouteDef[] = [
 	// --- claim game: jalur statis, sesi dijaga di dalam rutenya -------------
 	claimGameRoute,
 	claimStatusRoute,
+	curatedRoute,
 	// --- account: satu GET untuk halaman Account FE (profil + owned + history)
 	accountRoute,
 ];
