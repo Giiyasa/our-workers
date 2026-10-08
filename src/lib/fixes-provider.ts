@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { isIP } from 'node:net';
 import { FIXES_CONFIG } from '../fixes-config.mjs';
 import type { Sql } from './db';
 import { encryptAsset, decryptAsset } from './asset-crypto';
@@ -289,22 +290,54 @@ export async function downloadHosts(sql: Sql): Promise<string[]> {
     const rows = await sql `select download_hosts from fixes_provider_config where id=1`;
     return validateDownloadHosts(rows[0]?.download_hosts ?? []);
 }
-export function allowedDownloadUrl(raw: unknown, hosts: string[]): URL {
-    if (typeof raw !== 'string')
-        throw new FixesFailure('DOWNLOAD_URL');
+// URLs originate only from the fixed authenticated LuaTools endpoint, never from user input.
+export function allowedDownloadUrl(raw: unknown): URL {
+    if (typeof raw !== 'string' || raw.length > 16384) throw new FixesFailure('DOWNLOAD_URL');
     let url: URL;
+    try { url = new URL(raw); } catch { throw new FixesFailure('DOWNLOAD_URL'); }
+    const host = url.hostname.toLowerCase();
+    if (url.protocol !== 'https:' || url.username || url.password || (url.port && url.port !== '443') ||
+        isIP(host) || host.startsWith('[') || !host.includes('.') ||
+        /(?:^|\.)(?:localhost|local|internal|home|lan|arpa|invalid)$/.test(host)) throw new FixesFailure('DOWNLOAD_HOST');
+    try { validateDownloadHosts([host]); } catch { throw new FixesFailure('DOWNLOAD_HOST'); }
+    return url;
+}
+export function isPublicDownloadAddress(address: string): boolean {
+    if (isIP(address) === 4) {
+        const [a,b,c] = address.split('.').map(Number);
+        return !(a === 0 || a === 10 || a === 127 || a >= 224 ||
+            (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) ||
+            (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) ||
+            (a === 192 && b === 0 && (c === 0 || c === 2)) || (a === 192 && b === 88 && c === 99) ||
+            (a === 198 && (b === 18 || b === 19)) ||
+            (a === 198 && b === 51 && c === 100) || (a === 203 && b === 0 && c === 113));
+    }
+    if (isIP(address) === 6) {
+        const [a,b] = address.toLowerCase().split(':').map(v => parseInt(v || '0',16));
+        // Global unicast only; exclude transition, special-purpose and documentation ranges.
+        return a >= 0x2000 && a < 0x4000 && a !== 0x2002 && a !== 0x3fff &&
+            !(a === 0x2001 && (b < 0x200 || b === 0xdb8));
+    }
+    return false;
+}
+async function verifiedDownloadUrl(raw: unknown, sql: Sql): Promise<URL> {
+    const url = allowedDownloadUrl(raw);
+    // Fixed resolver, no bearer or signed package query sent to DNS.
+    // https://developers.cloudflare.com/1.1.1.1/encryption/dns-over-https/make-api-requests/dns-json/
+    let answers: {Status?: number; TC?: boolean; Answer?: {type:number;data:string}[]}[];
     try {
-        url = new URL(raw);
-    }
-    catch {
-        throw new FixesFailure('DOWNLOAD_URL');
-    }
-    if (url.protocol !== 'https:' ||
-        url.username ||
-        url.password ||
-        (url.port && url.port !== '443') ||
-        !hosts.includes(url.hostname.toLowerCase()))
-        throw new FixesFailure('DOWNLOAD_HOST');
+        answers = await Promise.all(['A','AAAA'].map(type => jsonFetch(
+            `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(url.hostname)}&type=${type}`,
+            {accept:'application/dns-json'}) as Promise<{Status?:number;TC?:boolean;Answer?:{type:number;data:string}[]}>));
+    } catch { throw new FixesFailure('DOWNLOAD_DNS'); }
+    if (answers.some(a => a.Status !== 0 || a.TC || (a.Answer !== undefined && !Array.isArray(a.Answer)))) throw new FixesFailure('DOWNLOAD_DNS');
+    const addresses = answers.flatMap(a => a.Answer ?? []).filter(a => a.type === 1 || a.type === 28);
+    if (!addresses.length || addresses.some(a => typeof a.data !== 'string' || !isPublicDownloadAddress(a.data))) throw new FixesFailure('DOWNLOAD_HOST');
+    // Audit hosts automatically. This list is informational, not a prerequisite or an authorization gate.
+    await sql`insert into fixes_provider_config(id,download_hosts) values(1,${sql.json([url.hostname])})
+ on conflict(id) do update set download_hosts=case when fixes_provider_config.download_hosts ? ${url.hostname}
+ or jsonb_array_length(fixes_provider_config.download_hosts)>=100 then fixes_provider_config.download_hosts
+ else fixes_provider_config.download_hosts || excluded.download_hosts end,updated_at=now()`;
     return url;
 }
 async function requestPackageLink(sql: Sql, env: Env, fixId: string, slot: Slot): Promise<{
@@ -331,11 +364,8 @@ async function requestPackageLink(sql: Sql, env: Env, fixId: string, slot: Slot)
     return data;
 }
 export async function fetchFixPackage(sql: Sql, env: Env, fixId: string, slot: Slot): Promise<Response> {
-    const hosts = await downloadHosts(sql);
-    if (!hosts.length)
-        throw new FixesFailure('DOWNLOAD_HOST');
     const data = await requestPackageLink(sql, env, fixId, slot);
-    let url = allowedDownloadUrl(data?.url, hosts);
+    let url = await verifiedDownloadUrl(data?.url, sql);
     // Never send the provider bearer token to package hosts, including redirects.
     for (let redirects = 0; redirects < 4; redirects++) {
         let res: Response;
@@ -350,7 +380,7 @@ export async function fetchFixPackage(sql: Sql, env: Env, fixId: string, slot: S
             await res.body?.cancel();
             if (!location)
                 throw new FixesFailure('DOWNLOAD_REDIRECT');
-            url = allowedDownloadUrl(new URL(location, url).toString(), hosts);
+            url = await verifiedDownloadUrl(new URL(location, url).toString(), sql);
             continue;
         }
         if (!res.ok || !res.body) {
@@ -364,13 +394,5 @@ export async function fetchFixPackage(sql: Sql, env: Env, fixId: string, slot: S
 // Admin can inspect the package hostname without downloading bytes or exposing a signed URL.
 export async function inspectPackageHost(sql: Sql, env: Env, fixId: string, slot: Slot): Promise<string> {
     const data = await requestPackageLink(sql, env, fixId, slot);
-    try {
-        const url = new URL(data.url!);
-        if (url.protocol !== 'https:' || url.username || url.password)
-            throw new Error();
-        return url.hostname;
-    }
-    catch {
-        throw new FixesFailure('DOWNLOAD_URL');
-    }
+    return (await verifiedDownloadUrl(data.url,sql)).hostname;
 }

@@ -15,7 +15,7 @@ Operasi admin tersedia lewat `scripts/fixes-admin.mjs`: login PKCE, refresh, sta
 | Pemeriksaan | Hasil |
 |---|---|
 | Worker TypeScript | Lulus |
-| Worker tests | 243 lulus |
+| Worker tests | 247 lulus |
 | PostgreSQL sementara | Patch rerun/RLS/dedup/lease/stale owner/publication, kuota 24 untuk dua akun, relogin preservation, rollover dan eligibility lulus |
 | Admin CLI fixture | Routing multiaccount refresh/disable/hosts/invalidation dan kerahasiaan input rusak lulus |
 | Worker deploy dry-run | Lulus; tidak deploy |
@@ -30,11 +30,13 @@ Artefak desktop: `../my-apps-testing/src-tauri/target/release/nextgame-desktop.e
 
 1. Setup baru: `supabase/FIXES_PATCH.sql` lalu `supabase/FIXES_MULTIACCOUNT_PATCH.sql`; jika awal sudah diterapkan, hanya patch multiaccount.
 2. Buat queue `fixes-package-fetch` dan DLQ-nya.
-3. Pasang secret `FIXES_SESSION_KEY_HEX`; nilai tetap ada di `src/fixes-config.mjs` dan allowlist host ada di DB; pertahankan R2/DB/auth secret existing.
+3. Pasang secret `FIXES_SESSION_KEY_HEX`; nilai tetap ada di `src/fixes-config.mjs` dan host file diperiksa/dicatat otomatis; pertahankan R2/DB/auth secret existing.
 4. Deploy Worker melalui workflow existing.
-5. Admin melakukan login provider dan sync katalog; host file/redirect dikonfirmasi melalui admin tooling.
+5. Admin melakukan login provider dan sync katalog; user langsung memilih Manifest/Fix. ID paket dan URL/redirect ditangani otomatis, tanpa perintah host manual.
 6. Uji end-to-end dengan akun dan paket nyata sebelum distribusi desktop.
 
 Tidak ada migrasi produksi, deploy Cloudflare, login provider nyata, download paket nyata, atau perubahan folder Steam/game user pada pengerjaan ini. Test DB memakai PostgreSQL sementara, HTTP memakai fixture, dan UI memakai mock khusus harness yang tidak masuk build produksi.
 
 Batas yang tercatat: banyak akun provider, masing-masing 24 permintaan upstream/hari WIB; metadata hash bukan versi binary otoritatif; perubahan binary tanpa metadata membutuhkan invalidasi admin; paket/ekstraksi dibatasi 4 GiB; Stored/Deflate ZIP didukung; pause/resume byte-range belum dipindahkan dari queue umum LuaTools; cleanup otomatis objek orphan/backup belum tersedia. Runtime S3 multipart dan kapasitas plan Worker produksi belum terbukti. Detail dan command setup ada di `FIXES_SETUP.md`; detail native/UI ada di `../my-apps-testing/FIXES_IMPLEMENTATION.md`.
+
+Host otomatis: HTTPS/domain/DNS publik dan redirect diperiksa; tidak bergantung daftar host awal. Regresi mencakup first-download tanpa config, redirect CDN publik, penolakan IP/domain private, DNS failure, bearer isolation dan satu reservasi kuota untuk seluruh redirect. Database test mengeksekusi SQL audit host aktual. Tidak ada perubahan frontend/native atau migrasi tambahan untuk revisi ini.

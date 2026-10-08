@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { SELF } from 'cloudflare:test';
 import worker from "../src/index";
-import { allowedDownloadUrl, digest, fetchFixPackage, providerAccessToken, saveProviderSession, refreshProviderSession, validateDownloadHosts, validateFix } from '../src/lib/fixes-provider';
+import { allowedDownloadUrl, isPublicDownloadAddress, digest, fetchFixPackage, providerAccessToken, saveProviderSession, refreshProviderSession, validateDownloadHosts, validateFix } from '../src/lib/fixes-provider';
 import { packageObjectKey, storePackage } from '../src/lib/fixes-storage';
 import { fixesPrepareRoute, fixesDownloadRoute } from '../src/routes/fixes';
 import { encryptAsset } from '../src/lib/asset-crypto';
@@ -77,28 +77,32 @@ describe('provider credentials and hosts', () => {
         await expect(providerAccessToken(sqlMock(q => q.includes('select a.account_id') ? [] : []), env)).rejects.toMatchObject({ code: 'PROVIDER_UNAVAILABLE' });
         expect(fetcher).not.toHaveBeenCalled();
     });
-    it('rejects unconfigured, HTTP, credential-bearing and alternate-port hosts', () => {
+    it('rejects HTTP, local, credential-bearing and alternate-port hosts', () => {
         for (const url of [
             'http://packages.test/a',
-            'https://evil.test/a',
+            'https://localhost/a',
             'https://user:pass@packages.test/a',
             'https://packages.test:8443/a',
             'https://127.0.0.1/a',
         ])
-            expect(() => allowedDownloadUrl(url, ['packages.test'])).toThrow();
-        expect(allowedDownloadUrl('https://packages.test/a?signature=fixture', ['packages.test']).hostname).toBe('packages.test');
+            expect(() => allowedDownloadUrl(url)).toThrow();
+        expect(allowedDownloadUrl('https://packages.test/a?signature=fixture').hostname).toBe('packages.test');
     });
     it('sends bearer only to LuaTools and stops unsafe redirects', async () => {
         const row = await sessionRow();
-        const fetcher = vi
-            .fn()
-            .mockResolvedValueOnce(Response.json({ url: 'https://packages.test/file' }))
-            .mockResolvedValueOnce(new Response(null, { status: 302, headers: { location: 'https://evil.test/file' } }));
+        const fetcher = vi.fn(async (raw: string, init?: RequestInit) => {
+            const host = new URL(String(raw)).hostname;
+            if (host === 'lua.tools') return Response.json({url:'https://packages.test/file'});
+            if (host === 'cloudflare-dns.com') return Response.json({Status:0,Answer:[{type:1,data:'93.184.216.34'}]});
+            return new Response(null,{status:302,headers:{location:'https://127.0.0.1/private'}});
+        });
         vi.stubGlobal('fetch', fetcher);
-        await expect(fetchFixPackage(sqlMock(q => q.includes('select download_hosts') ? [{ download_hosts: ['packages.test'] }] : [row]), env, 'fixture', 'fix')).rejects.toMatchObject({ code: 'DOWNLOAD_HOST' });
-        expect(fetcher.mock.calls[0][1].headers.Authorization).toBe('Bearer fixture-provider-token');
-        expect(fetcher.mock.calls[1][1].headers).toBeUndefined();
-        expect(fetcher).toHaveBeenCalledTimes(2);
+        await expect(fetchFixPackage(sqlMock(() => [row]), env, 'fixture', 'fix')).rejects.toMatchObject({ code: 'DOWNLOAD_HOST' });
+        const provider = fetcher.mock.calls.find(c => new URL(String(c[0])).hostname === 'lua.tools')!;
+        expect((provider[1]?.headers as Record<string,string>).Authorization).toBe('Bearer fixture-provider-token');
+        for(const call of fetcher.mock.calls.filter(c => new URL(String(c[0])).hostname !== 'lua.tools'))
+            expect((call[1]?.headers as Record<string,string>|undefined)?.Authorization).toBeUndefined();
+        expect(fetcher).toHaveBeenCalledTimes(4);
     });
     it('permits missing upstream filenames for original fallback naming', () => {
         expect(validateFix({ ...snap, manifestFilename: null, fixFilename: null }).hasFix).toBe(true);
@@ -269,13 +273,19 @@ describe('multiaccount provider controls', () => {
         expect(calls.some(q => q.includes('blocked_until=') && q.includes('Asia/Jakarta'))).toBe(true);
         expect(fetcher).toHaveBeenCalledTimes(1);
     });
-    it('does not consume quota or request a link before package hosts are configured', async () => {
-        const queries: string[] = [];
-        const fetcher = vi.fn();
-        vi.stubGlobal('fetch', fetcher);
-        await expect(fetchFixPackage(sqlMock(q => { queries.push(q); return []; }), env, 'fixture', 'fix')).rejects.toMatchObject({ code: 'DOWNLOAD_HOST' });
-        expect(queries).toHaveLength(1);
-        expect(fetcher).not.toHaveBeenCalled();
+    it('downloads a new provider host without any manual host settings', async () => {
+        const row=await sessionRow();const queries:string[]=[];
+        const fetcher=vi.fn(async (raw:string) => {
+            const host=new URL(String(raw)).hostname;
+            if(host==='lua.tools')return Response.json({url:'https://new-cdn.test/file'});
+            if(host==='cloudflare-dns.com')return Response.json({Status:0,Answer:[{type:1,data:'93.184.216.34'}]});
+            return new Response(new Uint8Array([0x50,0x4b,3,4]));
+        });vi.stubGlobal('fetch',fetcher);
+        const response=await fetchFixPackage(sqlMock(q=>{queries.push(q);return [row];}),env,'fixture','fix');
+        expect(response.ok).toBe(true);await response.body?.cancel();
+        expect(queries.some(q=>q.includes('select download_hosts'))).toBe(false);
+        expect(queries.some(q=>q.includes('insert into fixes_provider_config'))).toBe(true);
+        expect(queries.filter(q=>q.includes('insert into fixes_provider_usage'))).toHaveLength(1);
     });
     it('admin refresh targets one account without clearing daily usage or provider block', async () => {
         const row = await sessionRow();
@@ -293,4 +303,38 @@ describe('multiaccount provider controls', () => {
             expect(() => validateDownloadHosts([h])).toThrow();
         expect(validateDownloadHosts(['Packages.test', 'packages.test'])).toEqual(['packages.test']);
     });
+});
+
+describe('automatic download host checks',()=>{
+ it('accepts a public CDN redirect without another provider request',async()=>{
+  const row=await sessionRow();let providerRequests=0;const recorded:unknown[][]=[];
+  vi.stubGlobal('fetch',vi.fn(async(raw:string,init?:RequestInit)=>{
+   const url=new URL(String(raw));recorded.push([url,init]);
+   if(url.hostname==='lua.tools'){providerRequests++;return Response.json({url:'https://first-cdn.test/file?secret=signed'});}
+   if(url.hostname==='cloudflare-dns.com')return Response.json({Status:0,Answer:[{type:1,data:'93.184.216.34'}]});
+   if(url.hostname==='first-cdn.test')return new Response(null,{status:302,headers:{location:'https://second-cdn.test/file'}});
+   return new Response(new Uint8Array([1,2,3]));
+  }));
+  const res=await fetchFixPackage(sqlMock(()=>[row]),env,'fixture','manifest');expect(res.ok).toBe(true);await res.body?.cancel();expect(providerRequests).toBe(1);
+  for(const [url,init] of recorded){if((url as URL).hostname!=='lua.tools')expect((init as RequestInit)?.headers ?? {}).not.toHaveProperty('Authorization');
+   if((url as URL).hostname==='cloudflare-dns.com')expect((url as URL).search).not.toContain('signed');}
+ });
+ it('blocks domains resolving to private addresses before the file request',async()=>{
+  const row=await sessionRow();const requests:string[]=[];
+  vi.stubGlobal('fetch',vi.fn(async(raw:string)=>{const host=new URL(String(raw)).hostname;requests.push(host);
+   if(host==='lua.tools')return Response.json({url:'https://private-cdn.test/file'});
+   return Response.json({Status:0,Answer:[{type:1,data:'10.0.0.1'}]});}));
+  await expect(fetchFixPackage(sqlMock(()=>[row]),env,'fixture','fix')).rejects.toMatchObject({code:'DOWNLOAD_HOST'});
+  expect(requests).not.toContain('private-cdn.test');
+ });
+ it('fails closed on unresolved or failed DNS',async()=>{
+  for(const answer of [{Status:3},{Status:0,Answer:[]},{Status:0,TC:true}]){
+   const row=await sessionRow();vi.stubGlobal('fetch',vi.fn(async(raw:string)=>new URL(String(raw)).hostname==='lua.tools'?Response.json({url:'https://cdn.test/file'}):Response.json(answer)));
+   await expect(fetchFixPackage(sqlMock(()=>[row]),env,'fixture','fix')).rejects.toMatchObject({code:answer.Status===0&&!answer.TC?'DOWNLOAD_HOST':'DOWNLOAD_DNS'});
+  }
+ });
+ it('rejects nonpublic IPv4 and IPv6 address ranges',()=>{
+  for(const address of ['127.0.0.1','10.0.0.1','169.254.169.254','172.16.0.1','192.168.1.1','100.64.0.1','198.18.0.1','224.0.0.1','::1','fc00::1','fe80::1','::ffff:127.0.0.1','2001:db8::1','2002:a00:1::'])expect(isPublicDownloadAddress(address),address).toBe(false);
+  for(const address of ['93.184.216.34','1.1.1.1','192.0.78.24','2606:4700::1111','2001:4860:4860::8888'])expect(isPublicDownloadAddress(address),address).toBe(true);
+ });
 });

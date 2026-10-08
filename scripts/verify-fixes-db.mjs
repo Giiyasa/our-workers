@@ -66,5 +66,11 @@ try{
  await db.query("update fixes_provider_accounts set status='ready',expires_at=now()-interval '1 second',blocked_until=null where account_id=$1",[second]);
  assert.equal((await template(pick,limits)).rows.length,0,'expired accounts unavailable');
  const privateAccounts=await db.query("select has_table_privilege('anon','fixes_provider_accounts','SELECT') as allowed");assert.equal(privateAccounts.rows[0].allowed,false);
- console.log("PASS: SQL patch rerun, private RLS tables, job deduplication, lease expiry, stale-owner rejection and ready publication; multiaccount 24/day, relogin quota preservation, rollover and account eligibility (temporary PostgreSQL only).");
+ const audit=providerQueries.find(q=>q.includes('insert into fixes_provider_config'));assert.ok(audit);
+ await db.exec("update fixes_provider_config set download_hosts='[]'");
+ await template(audit,{"sql.json([url.hostname])":['new-cdn.test'],'url.hostname':'new-cdn.test'});
+ await template(audit,{"sql.json([url.hostname])":['new-cdn.test'],'url.hostname':'new-cdn.test'});
+ await template(audit,{"sql.json([url.hostname])":['second-cdn.test'],'url.hostname':'second-cdn.test'});
+ assert.deepEqual((await db.query('select download_hosts from fixes_provider_config where id=1')).rows[0].download_hosts,['new-cdn.test','second-cdn.test'],'automatic host audit inserts, appends and deduplicates');
+ console.log("PASS: SQL patch rerun, private RLS tables, job deduplication, lease expiry, stale-owner rejection and ready publication; multiaccount 24/day, relogin quota preservation, rollover and account eligibility; automatic host audit deduplication (temporary PostgreSQL only).");
 }finally{await db.close();}

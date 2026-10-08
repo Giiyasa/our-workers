@@ -8,7 +8,7 @@ Implementasi berada pada Worker `worker-toko` yang sama dengan auth/claim. R2 te
 2. Worker memeriksa sesi aplikasi, role, dan kepemilikan sebelum menyiapkan paket.
 3. Metadata paket siap diverifikasi melalui HEAD objek R2. Objek ada: download melalui Worker.
 4. Objek belum ada: satu job `FIXES_QUEUE` meminta link dari LuaTools dengan sesi provider admin.
-5. Paket diunduh tanpa meneruskan bearer provider ke host file, diperiksa, lalu diunggah multipart ke R2.
+5. Worker mengambil URL dari respons LuaTools, memeriksa HTTPS/domain publik dan DNS pada setiap redirect, lalu mengunduh tanpa meneruskan bearer provider ke host file. Host dicatat otomatis di DB. Paket diperiksa dan diunggah multipart ke R2; tidak ada konfigurasi host manual.
 6. Setelah upload lengkap, job menyimpan object key, ukuran, dan SHA-256. Desktop polling prepare hingga ready.
 7. Desktop mengunduh dari Worker langsung ke file sementara, memverifikasi checksum, lalu memasang secara lokal.
 
@@ -41,7 +41,7 @@ corepack pnpm exec wrangler queues create fixes-package-fetch-dlq
 node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('hex'))" | corepack pnpm exec wrangler secret put FIXES_SESSION_KEY_HEX
 ```
 
-Nilai tetap API/auth URL, anon key publik, callback Discord, default Worker URL, kuota 24 dan zona waktu berada di `src/fixes-config.mjs`, dibaca Worker dan CLI. Tidak perlu mengisi `LUATOOLS_ANON_KEY` atau `FIXES_DOWNLOAD_HOSTS` sebagai ENV. Daftar hostname HTTPS persis disimpan di `fixes_provider_config` melalui CLI `hosts`. Tanpa host yang diset, job berhenti sebelum memakai kuota. Kredensial rahasia tetap menggunakan secret existing; hanya kunci enkripsi sesi yang baru.
+Nilai tetap API/auth URL, anon key publik, callback Discord, default Worker URL, kuota 24 dan zona waktu berada di `src/fixes-config.mjs`, dibaca Worker dan CLI. Tidak perlu mengisi `LUATOOLS_ANON_KEY` atau `FIXES_DOWNLOAD_HOSTS` sebagai ENV. Host file ditemukan dari respons endpoint LuaTools yang tetap, diperiksa otomatis, dan dicatat di `fixes_provider_config` untuk audit. Daftar tersebut bukan allowlist yang harus diisi admin; boleh kosong saat awal setup. Kredensial rahasia tetap menggunakan secret existing; hanya kunci enkripsi sesi yang baru.
 
 Kredensial `R2_*`, `DIRECT_URL`, `WRITE_TOKEN`, serta queue Lua existing dipertahankan. Kredensial R2 harus mengizinkan multipart create/upload/complete/abort pada prefix Fixes. Prefix Fixes sebaiknya mempunyai lifecycle untuk multipart tidak lengkap. Objek selesai yang menjadi orphan akibat lease/revisi usang dipertahankan; pembersihannya belum otomatis.
 
@@ -68,17 +68,13 @@ node scripts/fixes-admin.mjs status
 node scripts/fixes-admin.mjs sync
 node scripts/fixes-admin.mjs sync 620
 
-# Gunakan Fix ID yang benar dari katalog, bukan AppID.
-node scripts/fixes-admin.mjs host FIX_ID manifest
-node scripts/fixes-admin.mjs host FIX_ID fix
-# Gunakan hostname nyata yang telah diperiksa; termasuk redirect host yang dibutuhkan.
-node scripts/fixes-admin.mjs hosts packages.example.com,redirect.example.com
+# Selesai: buka menu Fixes di desktop dan pilih Manifest/Fix.
+# Tidak perlu mencari Fix ID atau menjalankan host/hosts.
 
 # Refresh hanya dilakukan admin, tidak dipicu permintaan user.
 node scripts/fixes-admin.mjs refresh ACCOUNT_ID
 node scripts/fixes-admin.mjs disable ACCOUNT_ID
 node scripts/fixes-admin.mjs enable ACCOUNT_ID
-node scripts/fixes-admin.mjs invalidate FIX_ID fix
 ```
 
 Login awal memakai PKCE Supabase/Discord dengan callback `http://localhost:53789/callback`, sama dengan LuaTools. Port tersebut harus bebas. Browser hanya dibuka jika admin memilih `--open`. Refresh yang dicabut/gagal membutuhkan login admin ulang. Respons token lama tidak dapat menandai sesi baru hasil refresh sebagai gagal.
@@ -98,10 +94,10 @@ Tidak ada panel admin web baru; operasi admin tersedia lewat CLI dan API private
 | POST | `/api/admin/fixes/session` | WRITE_TOKEN; simpan sesi terenkripsi |
 | POST | `/api/admin/fixes/refresh` | WRITE_TOKEN; `{account_id}` refresh satu akun |
 | POST | `/api/admin/fixes/account` | WRITE_TOKEN; `{account_id,enabled}` aktif/nonaktif |
-| POST | `/api/admin/fixes/config` | WRITE_TOKEN; `{download_hosts:[...]}` simpan allowlist DB |
+| POST | `/api/admin/fixes/config` | WRITE_TOKEN; `{download_hosts:[...]}` seed/reset daftar audit, opsional; bukan gate download |
 | GET | `/api/admin/fixes/status` | WRITE_TOKEN; semua akun, pemakaian/sisa kuota hari ini dan error job, tanpa token |
 | POST | `/api/admin/fixes/sync` | WRITE_TOKEN; `{}` untuk katalog atau `{app_id}` untuk detail |
-| POST | `/api/admin/fixes/host` | WRITE_TOKEN; hostname paket saja |
+| POST | `/api/admin/fixes/host` | WRITE_TOKEN; diagnostik opsional hostname paket saja, memakai kuota upstream |
 | POST | `/api/admin/fixes/invalidate` | WRITE_TOKEN; invalidasi cache slot current revision |
 
 Role 2/3 dapat mengambil paket katalog. Role 4 harus sudah memiliki AppID dalam `user_list_game`, melalui claim existing. Fixes tidak menambahkan kepemilikan atau memotong free-claim coupon. Kuota 24/hari diterapkan pada akun provider, bukan pada user yang mengambil paket R2.
@@ -122,3 +118,11 @@ corepack pnpm test:fixes-admin
 Test Worker memakai binding uji dan tidak membuka DB produksi. Test DB menggunakan PostgreSQL sementara PGlite dan membaca SQL job dari implementasi. Test R2/provider memakai fixture HTTP, bukan paket nyata.
 
 Multipart memakai chunk 8 MiB, di atas minimum part non-final 5 MiB menurut [dokumentasi R2](https://developers.cloudflare.com/r2/objects/upload-objects/). POST multipart memakai header SigV4; GET/HEAD tetap memakai presigned URL sesuai [operasi R2](https://developers.cloudflare.com/r2/api/s3/presigned-urls/). Batas paket dan hasil ekstraksi saat ini 4 GiB. Kapasitas/CPU/subrequest pada plan Worker produksi tetap perlu diverifikasi dengan paket nyata.
+
+## Host download otomatis
+
+Setup admin normal cukup login dan sync katalog setelah Worker/queue/secret/database siap. ID paket berasal dari katalog dan dikirim frontend otomatis ketika Manifest/Fix ditekan. Endpoint prepare/queue tidak menerima URL download dari user; URL hanya berasal dari endpoint download LuaTools yang tetap dan terautentikasi.
+
+Worker menolak HTTP, kredensial di URL, port alternatif, IP literal, nama lokal, dan hasil DNS private/reserved. Redirect diperiksa ulang sebelum request berikutnya; bearer LuaTools tidak dikirim ke CDN maupun DNS. Resolusi A/AAAA memakai endpoint tetap Cloudflare DNS-over-HTTPS sesuai [dokumentasi DNS JSON](https://developers.cloudflare.com/1.1.1.1/encryption/dns-over-https/make-api-requests/dns-json/). DNS gagal menyebabkan job gagal sementara. Pemeriksaan DNS dan fetch hostname tetap dua operasi terpisah; ini bukan pinning IP transport. Hanya respons provider tepercaya yang boleh memulai download.
+
+Perintah `host`, `hosts`, dan `invalidate` tetap ada untuk diagnostik/operasi lanjutan, bukan prasyarat download. Tidak ada patch SQL tambahan untuk perubahan host otomatis; tabel config yang sudah ada dipakai sebagai audit maksimal 100 hostname.
