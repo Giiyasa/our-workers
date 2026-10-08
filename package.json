@@ -9,10 +9,13 @@
 		"start": "wrangler dev",
 		"test": "vitest",
 		"typecheck": "tsc --noEmit",
-		"cf-typegen": "wrangler types"
+		"cf-typegen": "wrangler types",
+		"test:fixes-db": "node scripts/verify-fixes-db.mjs",
+		"test:fixes-admin": "node scripts/verify-fixes-admin.mjs"
 	},
 	"devDependencies": {
 		"@cloudflare/vitest-plugin": "^1.0.0",
+		"@electric-sql/pglite": "0.5.8",
 		"@types/node": "^26.6.3",
 		"typescript": "^5.5.2",
 		"vitest": "~4.1.0",

@@ -113,7 +113,8 @@ export async function presignR2Get(
 	config: R2Config,
 	key: string,
 	expiresSeconds: number,
-	method: "GET" | "PUT" = "GET",
+	method: "GET" | "PUT" | "POST" | "DELETE" | "HEAD" = "GET",
+	extraQuery: Record<string, string> = {},
 ): Promise<string> {
 	const now = new Date();
 	const amzDate = now.toISOString().replace(/[-:]/g, "").split(".")[0] + "Z"; // 20261005T073354Z
@@ -128,6 +129,11 @@ export async function presignR2Get(
 		["X-Amz-Expires", String(Math.max(60, Math.min(expiresSeconds, 604_800)))],
 		["X-Amz-SignedHeaders", "host"],
 	]);
+
+	for (const [key, value] of Object.entries(extraQuery)) {
+		if (key.startsWith("X-Amz-")) throw new Error("Reserved signing parameter");
+		query.set(key, value);
+	}
 
 	// Canonical query string: sort by KEY LALU VALUE, semua URI-encoded.
 	const canonicalQuery = [...query.entries()]
@@ -268,4 +274,26 @@ function classifyR2FetchError(error: unknown): string {
 	if (/unsupported|not supported|not implemented/.test(message)) return "unsupported_request_option";
 	if (/network|connection/.test(message)) return "network_error";
 	return "unclassified";
+}
+
+/** Header SigV4 for server-to-server multipart POST/PUT/DELETE operations. */
+export async function signR2Request(config: R2Config, key: string, method: "POST" | "PUT" | "DELETE",
+ extraQuery: Record<string,string>, body?: Uint8Array | string): Promise<{url:string;headers:Record<string,string>}> {
+ const date=new Date().toISOString().replace(/[-:]/g,"").split(".")[0]+"Z";
+ const stamp=date.slice(0,8),scope=`${stamp}/auto/s3/aws4_request`;
+ const query=Object.entries(extraQuery).map(([k,v])=>[s3UriEncode(k),s3UriEncode(v)] as const)
+  .sort((a,b)=>a[0]<b[0]?-1:a[0]>b[0]?1:0).map(([k,v])=>`${k}=${v}`).join("&");
+ const payload=typeof body==="string"?new TextEncoder().encode(body):body??new Uint8Array();
+ const hash=toHex(new Uint8Array(await crypto.subtle.digest("SHA-256",payload as Uint8Array<ArrayBuffer>)));
+ const path=`/${config.bucket}/${key}`;
+ const signedHeaders="host;x-amz-content-sha256;x-amz-date";
+ const canonical=[method,path,query,`host:${config.host}\nx-amz-content-sha256:${hash}\nx-amz-date:${date}\n`,signedHeaders,hash].join("\n");
+ const sign=["AWS4-HMAC-SHA256",date,scope,await sha256Hex(canonical)].join("\n");
+ let signingKey=await hmacSha256(new TextEncoder().encode(`AWS4${config.secretAccessKey}`),stamp);
+ for(const part of ["auto","s3","aws4_request"])signingKey=await hmacSha256(signingKey,part);
+ const signature=toHex(await hmacSha256(signingKey,sign));
+ return {url:`https://${config.host}${path}?${query}`,headers:{
+  Authorization:`AWS4-HMAC-SHA256 Credential=${config.accessKeyId}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`,
+  "x-amz-date":date,"x-amz-content-sha256":hash,
+ }};
 }

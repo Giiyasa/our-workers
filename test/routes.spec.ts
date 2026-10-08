@@ -31,6 +31,18 @@ describe("tabel rute", () => {
 			"POST /api/claim-game",
 			"GET /api/claim/status/:app_id",
 			"GET /api/curated",
+   "GET /api/fixes",
+   "GET /api/fixes/package",
+   "POST /api/fixes/prepare",
+   "GET /api/fixes/:app_id",
+   "POST /api/admin/fixes/session",
+   "POST /api/admin/fixes/refresh",
+   "GET /api/admin/fixes/status",
+   "POST /api/admin/fixes/sync",
+   "POST /api/admin/fixes/host",
+   "POST /api/admin/fixes/invalidate",
+   "POST /api/admin/fixes/config",
+   "POST /api/admin/fixes/account",
 			"GET /api/account",
 		]);
 	});
@@ -96,7 +108,7 @@ describe("pencocokan jalur berparameter", () => {
 	it("rute statis tidak tertelan pola berparameter", async () => {
 		// Kalau `/api/games` ikut tercocokkan oleh /^\/api\/games\/([^/]+)$/,
 		// id-nya akan dibaca dari segmen setelahnya dan ditolak 400. Kenyataannya
-		// harus sampai ke gerbang DIRECT_URL (500) — artinya rute list yang menang.
+		// harus sampai ke gerbang DIRECT_URL (500) â€” artinya rute list yang menang.
 		const res = await SELF.fetch(`${BASE}/api/games`);
 		expect(res.status).toBe(500);
 		const body = (await res.json()) as Record<string, unknown>;
@@ -111,10 +123,10 @@ describe("pencocokan jalur berparameter", () => {
 	});
 });
 
-describe("GET /api/games — pagination, search, filter", () => {
+describe("GET /api/games â€” pagination, search, filter", () => {
 	/**
 	 * Semua nilai parameter di bawah ini sah dan akan lolos `prepare()`, jadi
-	 * responsnya berhenti di gerbang DIRECT_URL (500) — artinya validasi TIDAK
+	 * responsnya berhenti di gerbang DIRECT_URL (500) â€” artinya validasi TIDAK
 	 * menolak input yang benar, dan tidak ada koneksi DB yang dibuka.
 	 *
 	 * Ini membuktikan validasinya berjalan: kalau `readList()`/`readInt()`

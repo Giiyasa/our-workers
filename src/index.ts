@@ -57,6 +57,8 @@ import { accountRoute } from "./routes/account";
 import { claimStatusRoute } from "./routes/claim-status";
 import { curatedRoute } from "./routes/curated";
 import { consumeAssetJob, type AssetMessage } from "./lib/asset-jobs";
+import { consumeFixesJob, type FixesMessage } from "./lib/fixes-jobs";
+import { fixesRoutes } from "./routes/fixes";
 
 /**
  * TABEL RUTE — satu-satunya daftar rute.
@@ -89,6 +91,7 @@ const ROUTES: RouteDef[] = [
 	claimGameRoute,
 	claimStatusRoute,
 	curatedRoute,
+	...fixesRoutes,
 	// --- account: satu GET untuk halaman Account FE (profil + owned + history)
 	accountRoute,
 ];
@@ -113,11 +116,20 @@ function matchRoute(
 }
 
 export default {
-	async queue(batch: MessageBatch<AssetMessage>, env: Env): Promise<void> {
+	async queue(batch: MessageBatch<AssetMessage | FixesMessage>, env: Env): Promise<void> {
 		for (const message of batch.messages) {
-			if (!Number.isSafeInteger(message.body?.gameId) || message.body.gameId <= 0 || !/^[a-f\d-]{36}$/i.test(message.body.requestToken ?? "")) { message.ack(); continue; }
+            if (!message.body || typeof message.body !== "object") { message.ack(); continue; }
+            if ("kind" in message.body && message.body.kind === "fixes") {
+                const body = message.body;
+                if (typeof body.fixId !== "string" || !body.fixId || body.fixId.length > 160 || !/^[a-f0-9]{64}$/.test(body.revision) || !["manifest","fix"].includes(body.slot) || !/^[a-f0-9-]{36}$/.test(body.requestToken)) { message.ack(); continue; }
+                try { const result = await consumeFixesJob(body, env); if (result === "busy") message.retry({delaySeconds:300}); else message.ack(); }
+                catch { message.retry({delaySeconds:60}); }
+                continue;
+            }
+
+			if (!Number.isSafeInteger((message.body as AssetMessage)?.gameId) || (message.body as AssetMessage).gameId <= 0 || !/^[a-f\d-]{36}$/i.test(message.body.requestToken ?? "")) { message.ack(); continue; }
 			try {
-				const result = await consumeAssetJob(message.body, env);
+				const result = await consumeAssetJob(message.body as AssetMessage, env);
 				if (result === "busy") message.retry({ delaySeconds: 300 }); else message.ack();
 			} catch { message.retry({ delaySeconds: 60 }); }
 		}
@@ -209,4 +221,4 @@ export default {
 			return json({ ok: false, error: scrub(err) }, 500);
 		}
 	},
-} satisfies ExportedHandler<Env, AssetMessage>;
+} satisfies ExportedHandler<Env, AssetMessage | FixesMessage>;

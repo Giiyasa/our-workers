@@ -2,7 +2,7 @@
  * Variabel lingkungan khusus auth.
  *
  * `worker-configuration.d.ts` dibuat otomatis oleh `wrangler types` dari
- * wrangler.jsonc, jadi file itu TIDAK boleh disunting tangan — isinya hilang
+ * wrangler.jsonc, jadi file itu TIDAK boleh disunting tangan â€” isinya hilang
  * begitu `wrangler types` dijalankan lagi. Karena itu tambahan binding auth
  * ditulis di sini: TypeScript tetap menggabungkan deklarasi `interface Env`
  * dari beberapa file, jadi menambah di sini sama sahnya.
@@ -18,6 +18,9 @@
  * `wrangler secret put <NAMA>` (produksi) atau `.dev.vars` (lokal).
  */
 interface Env {
+    FIXES_QUEUE?: Queue<import("./lib/fixes-jobs").FixesMessage>;
+    FIXES_SESSION_KEY_HEX?: string;
+
 	ASSET_QUEUE?: Queue<{ gameId: number; requestToken: string }>;
 	RYUU_AUTH_CODE?: string;
 	/** JSON [{"id":"key_01","key":"secret"}, ...]. */
