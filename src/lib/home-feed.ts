@@ -14,7 +14,7 @@ async function chart(method: string, params: Record<string, string> = {}) {
  const url = new URL(`https://api.steampowered.com/ISteamChartsService/${method}/v1/`);
  for (const [key,value] of Object.entries(params)) url.searchParams.set(key,value);
  const response = await fetch(url, {signal: AbortSignal.timeout(20000)});
- if (!response.ok) throw new Error('HOME_STEAM_HTTP');
+ if (!response.ok) throw Object.assign(new Error('HOME_STEAM_HTTP'),{upstreamStatus:response.status});
  const text = await response.text();
  if (text.length > 2000000) throw new Error('HOME_STEAM_SIZE');
  return JSON.parse(text).response;
@@ -57,12 +57,15 @@ export function rankSelections(games: RatedGame[]) {
  };
 }
 export async function syncHomeFeed(sql: Sql, now = new Date(), _apiKey?: string) {
+ let stage="steam_charts";
  try {
   const entries=chartEntries((await chart('GetMostPlayedGames')).ranks).slice(0,100);
   const ranks=new Map(entries.map(e=>[e.appid,e.rank]));
   // A small rotating catalog sample adds quieter classics/indies to chart candidates.
+  stage="read_catalog";
   const extra=await sql`select app_id from game_lists where image is not null and image <> ''
    order by md5(app_id::text || ${now.toISOString().slice(0,10)}) limit 25`;
+  stage="read_snapshots";
   const previous=await sql`select entries from home_feed where section in ('trending','top_rated','highlights')`;
   const ids=new Set(entries.map(e=>e.appid));
   for(const row of extra) if(Number.isSafeInteger(Number(row.app_id)))ids.add(Number(row.app_id));
@@ -71,19 +74,22 @@ export async function syncHomeFeed(sql: Sql, now = new Date(), _apiKey?: string)
   const games:RatedGame[]=[];
   // Eight batches maximum, serial requests, no per-game HTTP calls.
   for(let i=0;i<candidates.length;i+=25){
+   stage=`steam_metadata_batch_${Math.floor(i/25)+1}`;
    const url=new URL('https://api.steampowered.com/IStoreBrowseService/GetItems/v1/');
    url.searchParams.set('input_json',JSON.stringify({ids:candidates.slice(i,i+25).map(appid=>({appid})),
     context:{language:'english',country_code:'US'},data_request:{include_reviews:true}}));
    const response=await fetch(url,{signal:AbortSignal.timeout(15000)});
-   if(!response.ok)throw new Error('HOME_METADATA_HTTP');
+   if(!response.ok)throw Object.assign(new Error('HOME_METADATA_HTTP'),{upstreamStatus:response.status});
    const text=await response.text();if(text.length>2000000)throw new Error('HOME_METADATA_SIZE');
    games.push(...ratedGames(JSON.parse(text).response?.store_items,ranks));
   }
   const selections=rankSelections(games);
   const counts:Record<string,number>={};
   // Publish all sections together; failures preserve the previous complete snapshot.
+  stage="begin_snapshots";
   await sql.begin(async tx=>{
    for(const [section,selected] of Object.entries(selections)){
+    stage=`write_${section}`;
     if(!selected.length){
      await tx`insert into home_feed(section,entries,updated_at) values(${section},'[]'::jsonb,now())
       on conflict(section) do update set entries=excluded.entries,updated_at=excluded.updated_at`;
@@ -91,7 +97,17 @@ export async function syncHomeFeed(sql: Sql, now = new Date(), _apiKey?: string)
     }
     counts[section]=await saveChart(tx as unknown as Sql,section,selected,null);
    }
+   stage="commit_snapshots";
   });
   return counts;
- } catch {console.warn('home_quality_sync_failed');return {status:'retained_previous'};}
+ } catch(error) {
+  const e=error as {message?:unknown;code?:unknown;upstreamStatus?:unknown};
+  const code=typeof e?.message==='string' && /^HOME_[A-Z_]{1,60}$/.test(e.message)?e.message:'HOME_SYNC_FAILED';
+  const dbCode=typeof e?.code==='string' && /^[A-Z0-9_]{1,40}$/.test(e.code)?e.code:undefined;
+  const upstreamStatus=Number.isInteger(e?.upstreamStatus)?e.upstreamStatus:undefined;
+  const diagnostic={status:'retained_previous',stage,code,db_code:dbCode,upstream_status:upstreamStatus};
+  console.warn('home_quality_sync_failed',diagnostic);
+  return diagnostic;
+ }
+
 }

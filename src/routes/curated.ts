@@ -17,4 +17,8 @@ export const curatedRoute:DbRoute={
  }
 };
 export const homeSyncRoute:DbRoute={method:'POST',path:'/api/admin/home/sync',token:'write',requiresDb:true,
- handle:async(_ctx,_input,sql)=>json({ok:true,sections:await syncHomeFeed(sql)})};
+ handle:async(_ctx,_input,sql)=>{
+  const sections=await syncHomeFeed(sql);
+  const failed='status' in sections;
+  return json({ok:!failed,sections},failed?503:200);
+ }};

@@ -22,7 +22,14 @@ describe('Home snapshots',()=>{
  it('retains snapshots when Steam metadata fails',async()=>{
   vi.stubGlobal('fetch',vi.fn(async(url:URL)=>Response.json({response:url.pathname.includes('GetMostPlayed')?{ranks:[{appid:2,rank:1}]}:{}})));
   const sql=vi.fn(async()=>[]) as unknown as Sql;
-  expect(await syncHomeFeed(sql,new Date('2026-10-09'))).toEqual({status:'retained_previous'});
+  expect(await syncHomeFeed(sql,new Date('2026-10-09'))).toMatchObject({status:'retained_previous',stage:'steam_metadata_batch_1',code:'HOME_INVALID_ITEMS'});
+ });
+ it('reports missing schema without leaking database secrets',async()=>{
+  vi.stubGlobal('fetch',vi.fn(async()=>Response.json({response:{ranks:[{appid:2,rank:1}]}})));
+  const sql=vi.fn(async()=>{throw Object.assign(new Error('postgres://secret:password@host'),{code:'42P01'});}) as unknown as Sql;
+  const result=await syncHomeFeed(sql);
+  expect(result).toMatchObject({stage:'read_catalog',db_code:'42P01',code:'HOME_SYNC_FAILED'});
+  expect(JSON.stringify(result)).not.toContain('password');
  });
  it('excludes free games, software, unknown prices and weak reviews',()=>{
   const item={success:1,type:0,appid:2,best_purchase_option:{final_price_in_cents:'999'},reviews:{summary_filtered:{review_count:10000,percent_positive:95}}};
