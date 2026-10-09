@@ -49,6 +49,8 @@
  * sekarang = hapus catatan sesi user (endpoint logout) atau ganti password.
  */
 
+import { compare } from "bcryptjs";
+
 import {
 	AUTH_SECRET_DEV,
 	MAX_EMAIL_LENGTH,
@@ -224,6 +226,12 @@ export async function hashPassword(password: string): Promise<string> {
  */
 export async function verifyPassword(raw: string, stored: string | null): Promise<boolean> {
 	if (!stored) return false;
+	// NextGameClient creates bcrypt credentials; keep legacy formats readable.
+	if (/^\$2[aby]\$/.test(stored)) {
+		if (!/^\$2[aby]\$12\$[./A-Za-z0-9]{53}$/.test(stored)) return false;
+		if (new TextEncoder().encode(raw).length > 72) return false;
+		return compare(raw, stored);
+	}
 
 	if (stored.startsWith(`${PASSWORD_HASH_TAG}$`)) {
 		const rest = stored.slice(PASSWORD_HASH_TAG.length + 1);

@@ -22,6 +22,7 @@
 		"wrangler": "^4"
 	},
 	"dependencies": {
+		"bcryptjs": "^3.0.3",
 		"postgres": "^3.4.9"
 	}
 }

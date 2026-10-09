@@ -8,6 +8,7 @@
  */
 
 import { describe, it, expect } from "vitest";
+import { hash } from "bcryptjs";
 import {
 	bytesToHex,
 	credentialFingerprint,
@@ -72,6 +73,15 @@ describe("md5Hex() — vektor uji resmi RFC 1321", () => {
 });
 
 describe("hashPassword() / verifyPassword()", () => {
+	it("accepts admin bcrypt and rejects wrong or overlong passwords", async () => {
+		const password = "Admin-created-password-123!";
+		const stored = await hash(password, 12);
+		expect(await verifyPassword(password, stored)).toBe(true);
+		expect(await verifyPassword("wrong-password", stored)).toBe(false);
+		const prefix = "a".repeat(72);
+		expect(await verifyPassword(prefix + "b", await hash(prefix, 12))).toBe(false);
+		expect(await verifyPassword(password, "$2b$12$broken")).toBe(false);
+	});
 	it("hash bisa diverifikasi ulang dengan password yang sama", async () => {
 		const stored = await hashPassword("rahasia123");
 		expect(await verifyPassword("rahasia123", stored)).toBe(true);
