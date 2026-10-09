@@ -15,7 +15,7 @@ Operasi admin tersedia lewat `scripts/fixes-admin.mjs`: login PKCE, refresh, sta
 | Pemeriksaan | Hasil |
 |---|---|
 | Worker TypeScript | Lulus |
-| Worker tests | 254 lulus |
+| Worker tests | 256 lulus |
 | PostgreSQL sementara | Patch rerun/RLS/dedup/lease/stale owner/publication, kuota 24 untuk dua akun, relogin preservation, rollover dan eligibility lulus |
 | Admin CLI fixture | Routing multiaccount refresh/disable/hosts/invalidation dan kerahasiaan input rusak lulus |
 | Worker deploy dry-run | Lulus; tidak deploy |
@@ -46,3 +46,5 @@ Host otomatis: HTTPS/domain/DNS publik dan redirect diperiksa; tidak bergantung 
 9 Oktober 2026: sync katalog menggunakan bulk JSON recordset, bukan query per game. Satu advisory lock transaksi dan satu SQL snapshot mengganti loop query; update/insert/deaktivasi tetap atomik. Tes 500 game membuktikan jumlah operasi DB konstan; SQL sementara memverifikasi upsert, deaktivasi dan rerun. Durasi produksi belum diukur.
 
 9 Oktober 2026: sync admin mengembalikan diagnostik aman upstream HTTP status atau SQLSTATE tanpa pesan DB/token. CLI menampilkan diagnostik tersebut. GET anonim katalog dari komputer pengembangan mendapat 403; respons dari Worker produksi belum diverifikasi, jadi sebab 503 produksi belum dipastikan.
+
+9 Oktober 2026: diagnostik sync mencatat stage/error_name dan kode transport Postgres (misalnya CONNECTION_CLOSED), selain SQLSTATE. Error saat membaca body provider diklasifikasikan PROVIDER_BODY_ERROR dan kegagalan cleanup tidak menimpa penyebab aslinya. Log produksi SYNC_FAILED yang diterima belum cukup untuk menentukan penyebab; belum ada bukti perbaikan runtime produksi.

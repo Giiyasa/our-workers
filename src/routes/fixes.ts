@@ -313,6 +313,7 @@ export const fixesAdminSyncRoute: DbRoute<number | null> = {
                 : fail(400, 'AppID tidak valid.');
     },
     handle: async (_, appId, sql) => {
+        let stage = appId ? "sync_details" : "fetch_catalog";
         try {
             if (appId) {
                 const game = await sql `select 1 from fixes_catalog where app_id=${appId}::bigint`;
@@ -321,15 +322,16 @@ export const fixesAdminSyncRoute: DbRoute<number | null> = {
                 await syncDetails(sql, appId);
                 return json({ ok: true });
             }
-            return json({ ok: true, count: await syncListings(sql) });
+            return json({ ok: true, count: await syncListings(sql, value => {stage=value;}) });
         }
         catch (e) {
             // Admin-only diagnostic fields; never return DB messages, URLs or tokens.
             const dbCode = e && typeof e === 'object' && 'code' in e &&
-                typeof e.code === 'string' && /^[0-9A-Z]{5}$/.test(e.code) ? e.code : undefined;
+                !(e instanceof FixesFailure) && typeof e.code === 'string' && /^[A-Z0-9_]{1,60}$/.test(e.code) ? e.code : undefined;
             const code = e instanceof FixesFailure ? e.code : dbCode ? 'SYNC_DB_FAILED' : 'SYNC_FAILED';
-            console.error('fixes_sync_failed', {code,db_code:dbCode,upstream_status:e instanceof FixesFailure ? e.upstreamStatus : undefined});
-            return json({ok:false,error:'Sinkronisasi katalog gagal.',code,
+            const errorName=e instanceof Error && /^[A-Za-z0-9_]{1,60}$/.test(e.name) ? e.name : 'UnknownError';
+            console.error('fixes_sync_failed', {code,stage,error_name:errorName,db_code:dbCode,upstream_status:e instanceof FixesFailure ? e.upstreamStatus : undefined});
+            return json({ok:false,error:'Sinkronisasi katalog gagal.',code,stage,error_name:errorName,
                 ...(dbCode ? {db_code:dbCode} : {}),
                 ...(e instanceof FixesFailure && e.upstreamStatus ? {upstream_status:e.upstreamStatus} : {})},503);
         }

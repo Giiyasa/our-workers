@@ -94,7 +94,7 @@ async function jsonFetch(url: string, headers?: Record<string, string>): Promise
         throw new FixesFailure('PROVIDER_NETWORK');
     }
     if (!res.ok) {
-        await res.body?.cancel();
+        await res.body?.cancel().catch(() => {});
         throw new FixesFailure(res.status === 401 || res.status === 403 ? 'PROVIDER_AUTH' : res.status === 429 ? 'PROVIDER_LIMIT' : 'PROVIDER_HTTP', res.status);
     }
     const reader = res.body?.getReader();
@@ -113,8 +113,12 @@ async function jsonFetch(url: string, headers?: Record<string, string>): Promise
             chunks.push(value);
         }
     }
+    catch (error) {
+        if (error instanceof FixesFailure) throw error;
+        throw new FixesFailure('PROVIDER_BODY_ERROR', res.status);
+    }
     finally {
-        await reader.cancel();
+        await reader.cancel().catch(() => {});
     }
     const bytes = new Uint8Array(size);
     let offset = 0;
@@ -129,14 +133,16 @@ async function jsonFetch(url: string, headers?: Record<string, string>): Promise
         throw new FixesFailure('CATALOG_FORMAT');
     }
 }
-export async function syncListings(sql: Sql): Promise<number> {
+export async function syncListings(sql: Sql, onStage: (stage: string) => void = () => {}): Promise<number> {
+    onStage("fetch_catalog");
     const data = (await jsonFetch(`${API}/api/denuvo/listings`)) as {
         games?: FixGame[];
     };
+    onStage("validate_catalog");
     if (!Array.isArray(data?.games) || !data.games.length || data.games.length > 20000)
         throw new FixesFailure('CATALOG_FORMAT');
     const games = data.games.map((g) => {
-        if (!/^\d+$/.test(String(g.appid)) ||
+        if (!g || typeof g !== 'object' || !/^\d+$/.test(String(g.appid)) ||
             !Number.isSafeInteger(Number(g.appid)) ||
             Number(g.appid) <= 0 ||
             typeof g.name !== 'string' ||
@@ -150,9 +156,12 @@ export async function syncListings(sql: Sql): Promise<number> {
         app_id: Number(g.appid), name: g.name, header_image: g.header_image ?? null,
         tags: g.tags, fix_count: Number(g.fixCount) || 0,
     })));
+    onStage("begin_catalog_transaction");
     // Constant number of DB round trips; serialize concurrent snapshots before publishing.
     await sql.begin(async tx => {
+        onStage("lock_catalog");
         await tx`select pg_advisory_xact_lock(53789,24)`;
+        onStage("write_catalog");
         await tx`with incoming as (
  select * from jsonb_to_recordset(${payload}::jsonb)
  as g(app_id bigint,name text,header_image text,tags jsonb,fix_count integer)

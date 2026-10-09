@@ -396,3 +396,18 @@ describe('admin sync failure diagnostics',()=>{
   expect(JSON.stringify(data)).not.toContain('secret');
  });
 });
+
+describe('sync runtime error classification',()=>{
+ it('preserves Postgres transport error codes and sync stage',async()=>{
+  vi.stubGlobal('fetch',vi.fn().mockResolvedValue(Response.json({games:[{appid:'620',name:'Fixture',tags:[],fixCount:1}]})));
+  const error=Object.assign(new Error('sensitive-connection-string'),{code:'CONNECTION_CLOSED'});
+  const response=await fixesAdminSyncRoute.handle(context('/api/admin/fixes/sync'),null,sqlMock(()=>{throw error;}));
+  const data=await response.json() as any;expect(data.code).toBe('SYNC_DB_FAILED');expect(data.db_code).toBe('CONNECTION_CLOSED');expect(data.stage).toBe('lock_catalog');expect(JSON.stringify(data)).not.toContain('sensitive');
+ });
+ it('classifies aborted provider body without cleanup masking the cause',async()=>{
+  const stream=new ReadableStream({start(controller){controller.error(new Error('sensitive-provider-message'));}});
+  vi.stubGlobal('fetch',vi.fn().mockResolvedValue(new Response(stream)));
+  const response=await fixesAdminSyncRoute.handle(context('/api/admin/fixes/sync'),null,sqlMock(()=>[]));
+  const data=await response.json() as any;expect(data.code).toBe('PROVIDER_BODY_ERROR');expect(data.stage).toBe('fetch_catalog');expect(JSON.stringify(data)).not.toContain('sensitive');
+ });
+});
