@@ -31,20 +31,67 @@ export async function saveChart(sql: Sql, section: string, entries: Entry[], per
  on conflict(section) do update set entries=excluded.entries,source_period=excluded.source_period,updated_at=excluded.updated_at`;
  return rows.length;
 }
-export async function syncHomeFeed(sql: Sql, now = new Date(), apiKey?: string) {
- const result: Record<string, string | number> = {};
- for (const section of ['most_played','popular_new_releases']) {
-  try {
-   let entries: Entry[], period: string | null = null;
-   if (section === 'most_played') entries = chartEntries((await chart('GetMostPlayedGames')).ranks);
-   else {
-    const month = new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth()-1,1));
-    period = month.toISOString().slice(0,7);
-    const response = await chart('GetMonthTopAppReleases', {rtime_month:String(month.getTime()/1000),include_dlc:'false',top_results_limit:'25', ...(apiKey ? {key:apiKey} : {})});
-    entries = chartEntries(response.top_combined_app_and_dlc_releases);
+export type RatedGame = {appid:number; positive:number; reviews:number; chartRank:number | null};
+export function ratedGames(items: unknown, ranks: Map<number,number>): RatedGame[] {
+ if (!Array.isArray(items)) throw new Error('HOME_INVALID_ITEMS');
+ const seen=new Set<number>();
+ return items.flatMap(item => {
+  const summary=item?.reviews?.summary_filtered;
+  const price=Number(item?.best_purchase_option?.final_price_in_cents);
+  if(item?.success!==1 || item?.type!==0 || item?.is_free===true || !Number.isFinite(price) || price<=0 ||
+   !Number.isSafeInteger(item.appid) || item.appid<=0 || seen.has(item.appid) ||
+   !Number.isSafeInteger(summary?.review_count) || summary.review_count<1000 ||
+   !Number.isFinite(summary?.percent_positive) || summary.percent_positive<80 || summary.percent_positive>100) return [];
+  seen.add(item.appid);
+  return [{appid:item.appid,positive:summary.percent_positive,reviews:summary.review_count,chartRank:ranks.get(item.appid)??null}];
+ });
+}
+export function rankSelections(games: RatedGame[]) {
+ // Confidence-adjusted rating prevents tiny samples outranking established games.
+ const score=(g:RatedGame)=>(g.positive*g.reviews+85*5000)/(g.reviews+5000);
+ const ranked=(rows:RatedGame[])=>rows.slice(0,HOME_LIMIT).map((g,i)=>({appid:g.appid,rank:i+1}));
+ return {
+  trending:ranked(games.filter(g=>g.chartRank!==null).sort((a,b)=>a.chartRank!-b.chartRank!)),
+  top_rated:ranked(games.filter(g=>g.positive>=90 && g.reviews>=5000).sort((a,b)=>score(b)-score(a)||b.reviews-a.reviews)),
+  highlights:ranked([...games].sort((a,b)=>(score(b)+Math.log10(b.reviews+1)*2)-(score(a)+Math.log10(a.reviews+1)*2)))
+ };
+}
+export async function syncHomeFeed(sql: Sql, now = new Date(), _apiKey?: string) {
+ try {
+  const entries=chartEntries((await chart('GetMostPlayedGames')).ranks).slice(0,100);
+  const ranks=new Map(entries.map(e=>[e.appid,e.rank]));
+  // A small rotating catalog sample adds quieter classics/indies to chart candidates.
+  const extra=await sql`select app_id from game_lists where image is not null and image <> ''
+   order by md5(app_id::text || ${now.toISOString().slice(0,10)}) limit 25`;
+  const previous=await sql`select entries from home_feed where section in ('trending','top_rated','highlights')`;
+  const ids=new Set(entries.map(e=>e.appid));
+  for(const row of extra) if(Number.isSafeInteger(Number(row.app_id)))ids.add(Number(row.app_id));
+  for(const row of previous) if(Array.isArray(row.entries))for(const e of row.entries)if(Number.isSafeInteger(e.appid))ids.add(e.appid);
+  const candidates=[...ids].filter(id=>id>0).slice(0,200);
+  const games:RatedGame[]=[];
+  // Eight batches maximum, serial requests, no per-game HTTP calls.
+  for(let i=0;i<candidates.length;i+=25){
+   const url=new URL('https://api.steampowered.com/IStoreBrowseService/GetItems/v1/');
+   url.searchParams.set('input_json',JSON.stringify({ids:candidates.slice(i,i+25).map(appid=>({appid})),
+    context:{language:'english',country_code:'US'},data_request:{include_reviews:true}}));
+   const response=await fetch(url,{signal:AbortSignal.timeout(15000)});
+   if(!response.ok)throw new Error('HOME_METADATA_HTTP');
+   const text=await response.text();if(text.length>2000000)throw new Error('HOME_METADATA_SIZE');
+   games.push(...ratedGames(JSON.parse(text).response?.store_items,ranks));
+  }
+  const selections=rankSelections(games);
+  const counts:Record<string,number>={};
+  // Publish all sections together; failures preserve the previous complete snapshot.
+  await sql.begin(async tx=>{
+   for(const [section,selected] of Object.entries(selections)){
+    if(!selected.length){
+     await tx`insert into home_feed(section,entries,updated_at) values(${section},'[]'::jsonb,now())
+      on conflict(section) do update set entries=excluded.entries,updated_at=excluded.updated_at`;
+     counts[section]=0;continue;
+    }
+    counts[section]=await saveChart(tx as unknown as Sql,section,selected,null);
    }
-   result[section] = await saveChart(sql,section,entries,period);
-  } catch { result[section] = 'retained_previous'; console.warn('home_feed_sync_failed', {section}); }
- }
- return result;
+  });
+  return counts;
+ } catch {console.warn('home_quality_sync_failed');return {status:'retained_previous'};}
 }

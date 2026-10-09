@@ -1,13 +1,22 @@
-# Home feed
+# Quality Home feed
 
-Apply supabase/HOME_FEED_PATCH.sql in the existing database before deploying Worker.
-Cron: 0 */12 * * * (00:00 and 12:00 UTC / 07:00 and 19:00 WIB).
-No new Queue. Optional STEAM_API_KEY secret can be used for monthly releases. Most Played anonymous Steam access verified locally.
-Initial refresh: node scripts/home-sync.mjs (reuses .dev.vars WRITE_TOKEN). Also POST /api/admin/home/sync using existing X-Write-Token.
-Read: GET /api/curated. Edge cache 5 minutes. Frontend query cache 1 hour.
-Two snapshots, maximum 25 entries each. Metadata remains in game_lists.
-Most Played considers up to 100 Steam candidates and stores only 25 catalog matches.
-Monthly releases request the previous completed UTC month, include_dlc=false.
-The current live monthly response was empty; this section is hidden until Steam supplies valid matching data. No old release list is fabricated.
-Each section retains its last successful snapshot on source failure/empty data/no catalog match.
-Apply SQL, deploy Worker, build frontend/native app. No production deployment or SQL execution performed by this change.
+Apply HOME_FEED_PATCH.sql once if missing; then apply supabase/HOME_QUALITY_PATCH.sql.
+Deploy Worker; run node scripts/home-sync.mjs using existing WRITE_TOKEN.
+No new ENV, Queue or Steam key needed for this pipeline.
+Cron remains 0 */12 * * * (07:00 and 19:00 WIB). Edge cache 5 minutes.
+
+Home sections: Trending Games, Top Rated, Pilihan Unggulan.
+Trending: paid game in Steam Most Played, at least 1000 reviews and 80% positive.
+Top Rated: paid game, at least 5000 reviews and 90% positive, confidence adjusted ranking.
+Highlights: paid game, rating confidence and review volume; hero comes from this selection.
+Only type=0 (game), positive purchase price, not free-to-play; unknown pricing excluded.
+Top Rated is among bounded candidates, not an exhaustive Steam-wide leaderboard.
+
+Each 12-hour run: one chart request, up to eight batches of 25 StoreBrowse GetItems.
+Candidate pool: up to 100 chart games + 25 rotating catalog entries + previous quality snapshots, deduplicated/capped at 200.
+No per-game HTTP requests or full-catalog review crawl. A once-per-run rotating catalog sample scans IDs only.
+Only three snapshots, up to 25 entries each, stored in DB. Store metadata is transient.
+Metadata/source failure retains the previous quality snapshot. Successful metadata with an empty qualified selection clears that section, preventing stale free games.
+Old raw most_played snapshot is not displayed by the new endpoint. No random fallback.
+Home no longer requests the additional 10-game catalog page or displays unfiltered recent games.
+Catalog, Fixes and login unaffected. No production SQL/deploy executed by local verification.
