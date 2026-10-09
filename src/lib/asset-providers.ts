@@ -1,5 +1,7 @@
 import type { Sql } from "./db";
 import { MAX_LUA_BYTES } from "../config";
+import { providerAccessToken, FixesFailure } from "./fixes-provider";
+import { extractLuaZip } from "./lua-archive";
 
 export class AssetFailure extends Error {
 	constructor(public code: string, message: string, public retrySeconds = 60) { super(message); }
@@ -22,7 +24,7 @@ async function providerRequest(provider: string, operation: string, url: string 
 			: /network|connection/.test(message) ? "network_error" : "unclassified";
 		// Fixed labels only: messages and URLs can contain bearer tokens/auth_code.
 		console.error("provider_request_failed", { provider, operation, detail, elapsedMs: Date.now() - startedAt });
-		throw new AssetFailure("PROVIDER_UNAVAILABLE", `${provider === "ryuu" ? "Provider 2" : "Provider 3"} sementara gagal dihubungi.`);
+		throw new AssetFailure("PROVIDER_UNAVAILABLE", `${provider === "ryuu" ? "Ryuu" : provider === "luatools" ? "LuaTools" : "Hubcap"} sementara gagal dihubungi.`);
 	}
 }
 
@@ -168,6 +170,47 @@ async function hubcap(sql: Sql, env: Env, gameId: number): Promise<Uint8Array | 
 	throw new AssetFailure("PROVIDER_QUOTA", "Kuota atau akses provider sementara tidak tersedia. Coba lagi nanti.");
 }
 
+export async function readLuaToolsPackage(response: Response, gameId: number): Promise<Uint8Array> {
+    const maxArchive=32*1024*1024;
+    if(!response.body || Number(response.headers.get("content-length"))>maxArchive) {
+        await response.body?.cancel();
+        throw new AssetFailure("PROVIDER_BAD_FILE","Paket LuaTools melebihi batas ukuran.");
+    }
+    const reader=response.body.getReader();const chunks:Uint8Array[]=[];let length=0;
+    try {
+        for(;;){const {done,value}=await reader.read();if(done)break;length+=value.length;
+            if(length>maxArchive)throw new AssetFailure("PROVIDER_BAD_FILE","Paket LuaTools melebihi batas ukuran.");chunks.push(value);}
+    } finally {await reader.cancel().catch(()=>{});}
+    const bytes=new Uint8Array(length);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length;}
+    let lua: Uint8Array=bytes;
+    if(bytes[0]===0x50 && bytes[1]===0x4b) {
+        try {lua=extractLuaZip(bytes,gameId,MAX_LUA_BYTES);}
+        catch {throw new AssetFailure("PROVIDER_BAD_FILE","Paket LuaTools tidak memiliki file Lua yang valid.");}
+    }
+    const valid=await readLua(new Response(lua as Uint8Array<ArrayBuffer>));
+    if(!new RegExp(`\\baddappid\\s*\\(\\s*${gameId}\\s*,`).test(new TextDecoder().decode(valid)))
+        throw new AssetFailure("PROVIDER_BAD_FILE","File LuaTools tidak sesuai AppID.");
+    return valid;
+}
+async function luaTools(sql: Sql, env: Env, gameId: number): Promise<Uint8Array | null> {
+    try {
+        const credential=await providerAccessToken(sql,env);
+        const url=new URL("https://lua.tools/api/manifest/download");
+        url.searchParams.set("appid",String(gameId));url.searchParams.set("source","Luie");
+        const response=await providerRequest("luatools","lua",url,{headers:{Authorization:`Bearer ${credential.token}`},signal:AbortSignal.timeout(20000)});
+        if(!response.ok) {
+            await response.body?.cancel();
+            if([401,403].includes(response.status))await sql`update fixes_provider_accounts set status='needs_admin',last_error_code='PROVIDER_AUTH',updated_at=now() where account_id=${credential.accountId}::uuid and xmin::text=${credential.version}`;
+            if(response.status===429)await sql`update fixes_provider_accounts set blocked_until=((now() at time zone 'Asia/Jakarta')::date+1)::timestamp at time zone 'Asia/Jakarta',last_error_code='PROVIDER_LIMIT',updated_at=now() where account_id=${credential.accountId}::uuid`;
+            console.warn("luatools_lua_fallback",{status:response.status});return null;
+        }
+        return await readLuaToolsPackage(response,gameId);
+    } catch(error) {
+        console.warn("luatools_lua_fallback",{code:error instanceof FixesFailure || error instanceof AssetFailure?error.code:"PROVIDER_UNAVAILABLE"});
+        return null;
+    }
+}
+
 export async function fetchProviderLua(sql: Sql, env: Env, gameId: number): Promise<{ bytes: Uint8Array; source: string }> {
 	if (!env.RYUU_AUTH_CODE?.trim()) throw new AssetFailure("PROVIDER_CONFIG", "Key provider 2 belum dikonfigurasi.");
 	const url = new URL("https://generator.ryuu.lol/resellerlua");
@@ -179,6 +222,8 @@ export async function fetchProviderLua(sql: Sql, env: Env, gameId: number): Prom
 		return { bytes: await readLua(response), source: "provider_2" };
 	}
 	await response.body?.cancel();
+	const luatools = await luaTools(sql, env, gameId);
+	if (luatools) return { bytes: luatools, source: "luatools_luie" };
 	const bytes = await hubcap(sql, env, gameId);
 	if (!bytes) throw new AssetFailure("ASSET_NOT_FOUND", "Asset game belum tersedia pada semua provider.", 3600);
 	return { bytes, source: "provider_3" };
