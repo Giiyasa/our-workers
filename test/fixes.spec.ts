@@ -298,6 +298,40 @@ describe('multiaccount provider controls', () => {
         expect(calls.every(c => !c.q.includes('fixes_provider_usage') && !c.q.includes('blocked_until='))).toBe(true);
         expect(calls.filter(c => c.q.includes('account_id=')).every(c => c.v.includes(token))).toBe(true);
     });
+    it('automatically refreshes an expired account before reserving exactly one download', async () => {
+        const row = await sessionRow(); let refreshed = false;
+        const queries: string[] = [];
+        const fetcher = vi.fn().mockResolvedValue(Response.json({access_token:'renewed-token',refresh_token:'renewed-refresh',expires_in:3600}));
+        vi.stubGlobal('fetch', fetcher);
+        const sql = sqlMock(q => {
+            queries.push(q);
+            if(q.includes('select a.account_id') && q.includes('limit 4')) return [{account_id:row.account_id}];
+            if(q.includes('select a.account_id')) return refreshed ? [row] : [];
+            if(q.includes('set session_encrypted=')) { refreshed=true; return []; }
+            if(q.includes('select encode(session_encrypted')) return [row];
+            if(q.includes('insert into fixes_provider_usage')) return [{download_count:1}];
+            return [];
+        });
+        expect((await providerAccessToken(sql,env)).accountId).toBe(row.account_id);
+        expect(fetcher).toHaveBeenCalledTimes(1);
+        expect(fetcher.mock.calls[0][0]).toContain('grant_type=refresh_token');
+        expect(queries.filter(q=>q.includes('insert into fixes_provider_usage'))).toHaveLength(1);
+        expect(queries.find(q=>q.includes('limit 4'))).toContain('blocked_until');
+        expect(queries.find(q=>q.includes('limit 4'))).toContain('download_count');
+        expect(queries.find(q=>q.includes('select encode(session_encrypted'))).toContain('skip locked');
+        expect(queries.every(q=>!q.includes('download_count=0') && !q.includes('blocked_until=null'))).toBe(true);
+    });
+    it('skips automatic rotation when another job already refreshed or locked the account', async () => {
+        const fetcher=vi.fn(); vi.stubGlobal('fetch',fetcher);
+        await refreshProviderSession(sqlMock(()=>[]),env,token,true);
+        expect(fetcher).not.toHaveBeenCalled();
+    });
+    it('temporary refresh HTTP failure does not invalidate the account', async () => {
+        const row=await sessionRow(); const queries:string[]=[];
+        vi.stubGlobal('fetch',vi.fn().mockResolvedValue(new Response(null,{status:503})));
+        await expect(refreshProviderSession(sqlMock(q=>{queries.push(q);return [row];}),env,token,true)).rejects.toMatchObject({code:'PROVIDER_HTTP'});
+        expect(queries.every(q=>!q.includes("last_error_code='REFRESH_REJECTED'"))).toBe(true);
+    });
     it('host settings reject IPs, URLs, wildcards and localhost', () => {
         for (const h of ['127.0.0.1', 'https://packages.test', '*.packages.test', 'localhost', 'a.localhost'])
             expect(() => validateDownloadHosts([h])).toThrow();

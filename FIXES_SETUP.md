@@ -128,3 +128,6 @@ Worker menolak HTTP, kredensial di URL, port alternatif, IP literal, nama lokal,
 Perintah `host`, `hosts`, dan `invalidate` tetap ada untuk diagnostik/operasi lanjutan, bukan prasyarat download. Tidak ada patch SQL tambahan untuk perubahan host otomatis; tabel config yang sudah ada dipakai sebagai audit maksimal 100 hostname.
 
 Sync katalog memakai batch bulk maksimal 16 KiB UTF-8 dalam satu transaksi, sehingga tidak mengirim seluruh snapshot dalam satu parameter maupun satu query per game. Jika menggunakan versi sebelum perbaikan bulk dan mengalami timeout, deploy Worker terbaru lalu ulangi perintah sync. Tidak diperlukan migrasi atau perubahan ENV untuk perbaikan ini.
+
+## Refresh sesi otomatis saat download
+Worker menggunakan akun siap yang tokennya masih valid terlebih dahulu. Jika tidak ada, maksimal empat akun kedaluwarsa dengan kuota tersisa dicoba refresh otomatis memakai refresh token terenkripsi. Akun disabled, diblokir atau kehabisan kuota tidak dicoba. Lock dan pemeriksaan ulang mencegah rotasi token bersamaan. Refresh tidak mereset kuota atau blokir; reservasi download tetap dihitung terpisah. HTTP sementara tidak mengubah akun menjadi REFRESH_REJECTED. Refresh ditolak memerlukan login ulang admin. Tidak perlu ENV atau migrasi baru; deploy Worker terbaru.

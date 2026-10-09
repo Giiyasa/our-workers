@@ -249,12 +249,19 @@ export async function saveProviderSession(sql: Sql, env: Env, input: {
     // Deliberately preserve usage and blocked_until across login and refresh.
     return id;
 }
-export async function refreshProviderSession(sql: Sql, env: Env, id: string): Promise<void> {
+export async function refreshProviderSession(sql: Sql, env: Env, id: string, automatic = false): Promise<void> {
     accountId(id);
     const result = await sql.begin(async (tx) => {
-        const rows = await tx `select encode(session_encrypted,'hex') as encrypted from fixes_provider_accounts where account_id=${id}::uuid for update`;
-        if (!rows[0])
+        // Recheck under the lock: another queue job may have already rotated the token.
+        const rows = automatic
+            ? await tx `select encode(session_encrypted,'hex') as encrypted from fixes_provider_accounts
+ where account_id=${id}::uuid and (status='ready' or (status='needs_admin' and last_error_code='SESSION_EXPIRED'))
+ and expires_at<=now()+interval '30 seconds' for update skip locked`
+            : await tx `select encode(session_encrypted,'hex') as encrypted from fixes_provider_accounts where account_id=${id}::uuid for update`;
+        if (!rows[0]) {
+            if (automatic) return null;
             throw new FixesFailure('SESSION_MISSING');
+        }
         const s = JSON.parse(new TextDecoder().decode(await decryptAsset(rows[0].encrypted, env.FIXES_SESSION_KEY_HEX))) as ProviderSession;
         let res: Response;
         try {
@@ -266,6 +273,7 @@ export async function refreshProviderSession(sql: Sql, env: Env, id: string): Pr
         }
         if (!res.ok) {
             await res.body?.cancel();
+            if (![400, 401, 403].includes(res.status)) return 'PROVIDER_HTTP';
             await tx `update fixes_provider_accounts set status='needs_admin',last_error_code='REFRESH_REJECTED',updated_at=now() where account_id=${id}::uuid`;
             return 'REFRESH_REJECTED';
         }
@@ -286,7 +294,7 @@ export async function refreshProviderSession(sql: Sql, env: Env, id: string): Pr
 }
 // Every call reserves one upstream attempt, atomically, before contacting provider.
 // Failed/uncertain requests also count; never refund an upstream attempt.
-export async function providerAccessToken(sql: Sql, env: Env): Promise<{
+export async function providerAccessToken(sql: Sql, env: Env, allowRefresh = true): Promise<{
     token: string;
     version: string;
     accountId: string;
@@ -308,8 +316,27 @@ export async function providerAccessToken(sql: Sql, env: Env): Promise<{
  where fixes_provider_usage.download_count<${FIXES_CONFIG.dailyLimit} returning download_count`;
         return reserved.length ? candidates[0] : null;
     });
-    if (!row)
+    if (!row) {
+        if (allowRefresh) {
+            // Bounded pool recovery; no refresh for disabled, blocked or exhausted accounts.
+            const expired = await sql `select a.account_id::text from fixes_provider_accounts a
+ left join fixes_provider_usage u on u.account_id=a.account_id and u.usage_day=(now() at time zone 'Asia/Jakarta')::date
+ where (a.status='ready' or (a.status='needs_admin' and a.last_error_code='SESSION_EXPIRED'))
+ and a.expires_at<=now()+interval '30 seconds' and (a.blocked_until is null or a.blocked_until<=now())
+ and coalesce(u.download_count,0)<${FIXES_CONFIG.dailyLimit}
+ order by coalesce(u.download_count,0),a.account_id limit 4`;
+            for (const account of expired) {
+                try {
+                    await refreshProviderSession(sql, env, account.account_id, true);
+                    return await providerAccessToken(sql, env, false);
+                } catch (error) {
+                    if (!(error instanceof FixesFailure)) throw error;
+                    console.warn('fixes_session_refresh_failed', { code: error.code });
+                }
+            }
+        }
         throw new FixesFailure('PROVIDER_UNAVAILABLE');
+    }
     try {
         const s = JSON.parse(new TextDecoder().decode(await decryptAsset(row.encrypted, env.FIXES_SESSION_KEY_HEX))) as ProviderSession;
         if (typeof s.access_token !== 'string' || !s.access_token)
