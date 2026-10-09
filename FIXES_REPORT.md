@@ -15,7 +15,7 @@ Operasi admin tersedia lewat `scripts/fixes-admin.mjs`: login PKCE, refresh, sta
 | Pemeriksaan | Hasil |
 |---|---|
 | Worker TypeScript | Lulus |
-| Worker tests | 247 lulus |
+| Worker tests | 250 lulus |
 | PostgreSQL sementara | Patch rerun/RLS/dedup/lease/stale owner/publication, kuota 24 untuk dua akun, relogin preservation, rollover dan eligibility lulus |
 | Admin CLI fixture | Routing multiaccount refresh/disable/hosts/invalidation dan kerahasiaan input rusak lulus |
 | Worker deploy dry-run | Lulus; tidak deploy |
@@ -40,3 +40,5 @@ Tidak ada migrasi produksi, deploy Cloudflare, login provider nyata, download pa
 Batas yang tercatat: banyak akun provider, masing-masing 24 permintaan upstream/hari WIB; metadata hash bukan versi binary otoritatif; perubahan binary tanpa metadata membutuhkan invalidasi admin; paket/ekstraksi dibatasi 4 GiB; Stored/Deflate ZIP didukung; pause/resume byte-range belum dipindahkan dari queue umum LuaTools; cleanup otomatis objek orphan/backup belum tersedia. Runtime S3 multipart dan kapasitas plan Worker produksi belum terbukti. Detail dan command setup ada di `FIXES_SETUP.md`; detail native/UI ada di `../my-apps-testing/FIXES_IMPLEMENTATION.md`.
 
 Host otomatis: HTTPS/domain/DNS publik dan redirect diperiksa; tidak bergantung daftar host awal. Regresi mencakup first-download tanpa config, redirect CDN publik, penolakan IP/domain private, DNS failure, bearer isolation dan satu reservasi kuota untuk seluruh redirect. Database test mengeksekusi SQL audit host aktual. Tidak ada perubahan frontend/native atau migrasi tambahan untuk revisi ini.
+
+9 Oktober 2026: binding array AppID pada katalog diperbaiki menjadi teks array PostgreSQL eksplisit yang tervalidasi, kompatibel dengan fetch_types:false. Filter kosong My games menghasilkan daftar kosong. Regresi HTTP dan SQL nyata sementara mencakup katalog tanpa filter, filter kosong dan AppID terisi; belum diverifikasi pada Worker produksi.

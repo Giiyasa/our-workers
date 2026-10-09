@@ -44,13 +44,15 @@ export const fixesListRoute: DbRoute = {
         const idsRaw = ctx.url.searchParams.get('installed');
         if (idsRaw && (idsRaw.length > 30000 || !/^\d+(,\d+)*$/.test(idsRaw)))
             return fail(400, 'Daftar game terpasang tidak valid.');
-        const installed = idsRaw?.split(',').map(Number) ?? [];
+        const installed = idsRaw ? idsRaw.split(',').map(Number) : [];
         if (installed.some((id) => !Number.isSafeInteger(id) || id <= 0))
             return fail(400, 'AppID tidak valid.');
+        // Explicit validated array text: postgres.js fetch_types:false cannot infer empty bigint arrays.
+        const installedArray = `{${installed.join(',')}}`;
         const rows = await sql `select app_id::text as appid,name,header_image,fix_count as "fixCount",tags,count(*) over()::int as total
    from fixes_catalog where active=true and (${q}='' or name ilike ${'%' + q + '%'} or app_id::text=${q})
    and (${tag}='' or exists(select 1 from jsonb_array_elements(tags) t where t->>'slug'=${tag} or t->>'id'=${tag}))
-   and (${idsRaw === null} or app_id=any(${installed}::bigint[])) order by lower(name),app_id limit ${limit} offset ${(Math.floor(page) - 1) * limit}`;
+   and (${idsRaw === null} or app_id=any(${installedArray}::bigint[])) order by lower(name),app_id limit ${limit} offset ${(Math.floor(page) - 1) * limit}`;
         const tags = await sql `select distinct t as tag from fixes_catalog,jsonb_array_elements(tags) t where active=true`;
         return json({
             ok: true,

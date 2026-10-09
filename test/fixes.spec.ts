@@ -3,7 +3,7 @@ import { SELF } from 'cloudflare:test';
 import worker from "../src/index";
 import { allowedDownloadUrl, isPublicDownloadAddress, digest, fetchFixPackage, providerAccessToken, saveProviderSession, refreshProviderSession, validateDownloadHosts, validateFix } from '../src/lib/fixes-provider';
 import { packageObjectKey, storePackage } from '../src/lib/fixes-storage';
-import { fixesPrepareRoute, fixesDownloadRoute } from '../src/routes/fixes';
+import { fixesListRoute, fixesPrepareRoute, fixesDownloadRoute } from '../src/routes/fixes';
 import { encryptAsset } from '../src/lib/asset-crypto';
 import type { Sql } from '../src/lib/db';
 import type { RouteContext } from '../src/lib/types';
@@ -336,5 +336,24 @@ describe('automatic download host checks',()=>{
  it('rejects nonpublic IPv4 and IPv6 address ranges',()=>{
   for(const address of ['127.0.0.1','10.0.0.1','169.254.169.254','172.16.0.1','192.168.1.1','100.64.0.1','198.18.0.1','224.0.0.1','::1','fc00::1','fe80::1','::ffff:127.0.0.1','2001:db8::1','2002:a00:1::'])expect(isPublicDownloadAddress(address),address).toBe(false);
   for(const address of ['93.184.216.34','1.1.1.1','192.0.78.24','2606:4700::1111','2001:4860:4860::8888'])expect(isPublicDownloadAddress(address),address).toBe(true);
+ });
+});
+
+describe('Fixes catalog array binding',()=>{
+ it.each([
+  ['/api/fixes','{}',true],
+  ['/api/fixes?installed=','{}',false],
+  ['/api/fixes?installed=620,730','{620,730}',false],
+ ])('binds installed IDs as explicit PostgreSQL array text for %s',async(path,arrayText,allGames)=>{
+  let bound:unknown[]=[];
+  const sql=sqlMock((query,values)=>{
+   if(query.includes('access_role_code'))return [{access_role_code:3}];
+   if(query.includes('app_id=any(')){bound=values;return [];}
+   return [];
+  });
+  const response=await fixesListRoute.handle(context(path),undefined,sql);
+  expect(response.status).toBe(200);
+  expect(bound).toContain(arrayText);expect(bound).toContain(allGames);
+  expect(bound.some(Array.isArray)).toBe(false);
  });
 });
