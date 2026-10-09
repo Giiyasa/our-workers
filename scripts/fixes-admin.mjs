@@ -25,7 +25,7 @@ async function admin(path, body, method = 'POST') {
     if (!res.ok) {
         const code = typeof data.code === 'string' && /^[A-Z0-9_]{1,60}$/.test(data.code) ? data.code : 'ADMIN_FAILED';
         const details = [];
-        if(typeof data.stage==='string' && /^[a-z_]{1,60}$/.test(data.stage))details.push(`Stage: ${data.stage}.`);
+        if(typeof data.stage==='string' && /^[a-z0-9_]{1,80}$/.test(data.stage))details.push(`Stage: ${data.stage}.`);
         if(typeof data.error_name==='string' && /^[A-Za-z0-9_]{1,60}$/.test(data.error_name))details.push(`Error: ${data.error_name}.`);
         if(Number.isInteger(data.upstream_status) && data.upstream_status >= 100 && data.upstream_status <= 599)
             details.push(`LuaTools HTTP ${data.upstream_status}`);

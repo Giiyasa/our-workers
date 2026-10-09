@@ -152,17 +152,31 @@ export async function syncListings(sql: Sql, onStage: (stage: string) => void = 
     });
     if (new Set(games.map(g => String(Number(g.appid)))).size !== games.length)
         throw new FixesFailure('CATALOG_FORMAT');
-    const payload = JSON.stringify(games.map(g => ({
-        app_id: Number(g.appid), name: g.name, header_image: g.header_image ?? null,
-        tags: g.tags, fix_count: Number(g.fixCount) || 0,
-    })));
+    // Bound each Postgres parameter instead of sending the entire snapshot in one socket write.
+    const batches: string[] = [];
+    let entries: string[] = [], bytes = 2;
+    for (const g of games) {
+        const entry = JSON.stringify({app_id:Number(g.appid),name:g.name,header_image:g.header_image ?? null,
+            tags:g.tags,fix_count:Number(g.fixCount) || 0});
+        const size = new TextEncoder().encode(entry).byteLength;
+        if (size + 2 > 16 * 1024) throw new FixesFailure('CATALOG_ROW_TOO_LARGE');
+        if (entries.length && bytes + size + 1 > 16 * 1024) {
+            batches.push(`[${entries.join(',')}]`); entries=[]; bytes=2;
+        }
+        bytes += size + (entries.length ? 1 : 0); entries.push(entry);
+    }
+    if (entries.length) batches.push(`[${entries.join(',')}]`);
     onStage("begin_catalog_transaction");
-    // Constant number of DB round trips; serialize concurrent snapshots before publishing.
     await sql.begin(async tx => {
         onStage("lock_catalog");
         await tx`select pg_advisory_xact_lock(53789,24)`;
-        onStage("write_catalog");
-        await tx`with incoming as (
+        onStage("deactivate_catalog");
+        // All writes are in the same transaction; any failed batch rolls back this change too.
+        await tx`update fixes_catalog set active=false where active=true`;
+        for (let index=0;index<batches.length;index++) {
+            const payload=batches[index];
+            onStage(`write_catalog_batch_${index+1}_of_${batches.length}`);
+            await tx`with incoming as (
  select * from jsonb_to_recordset(${payload}::jsonb)
  as g(app_id bigint,name text,header_image text,tags jsonb,fix_count integer)
 ), saved as (
@@ -171,11 +185,10 @@ export async function syncListings(sql: Sql, onStage: (stage: string) => void = 
  on conflict(app_id) do update set name=excluded.name,header_image=excluded.header_image,
  tags=excluded.tags,fix_count=excluded.fix_count,active=true,synced_at=now()
  returning app_id
-), retired as (
- update fixes_catalog set active=false where active=true and not exists(
- select 1 from incoming where incoming.app_id=fixes_catalog.app_id) returning app_id
 )
  select count(*)::int as count from saved`;
+        }
+        onStage("commit_catalog");
     });
     return games.length;
 }

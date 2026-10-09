@@ -127,4 +127,4 @@ Worker menolak HTTP, kredensial di URL, port alternatif, IP literal, nama lokal,
 
 Perintah `host`, `hosts`, dan `invalidate` tetap ada untuk diagnostik/operasi lanjutan, bukan prasyarat download. Tidak ada patch SQL tambahan untuk perubahan host otomatis; tabel config yang sudah ada dipakai sebagai audit maksimal 100 hostname.
 
-Sync katalog memakai satu operasi bulk atomik, sehingga jumlah round-trip DB tidak bertambah per game. Jika menggunakan versi sebelum perbaikan bulk dan mengalami timeout, deploy Worker terbaru lalu ulangi perintah sync. Tidak diperlukan migrasi atau perubahan ENV untuk perbaikan ini.
+Sync katalog memakai batch bulk maksimal 16 KiB UTF-8 dalam satu transaksi, sehingga tidak mengirim seluruh snapshot dalam satu parameter maupun satu query per game. Jika menggunakan versi sebelum perbaikan bulk dan mengalami timeout, deploy Worker terbaru lalu ulangi perintah sync. Tidak diperlukan migrasi atau perubahan ENV untuk perbaikan ini.

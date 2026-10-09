@@ -82,10 +82,18 @@ try{
  const bulk=providerQueries.find(q=>q.includes('with incoming as ('));assert.ok(bulk);
  const snapshot=JSON.stringify([{app_id:620,name:'Updated fixture',header_image:null,tags:[],fix_count:2},{app_id:730,name:'New fixture',header_image:null,tags:[],fix_count:1}]);
  await db.exec("insert into fixes_catalog(app_id,name)values(999,'Old fixture')");
- await template(bulk,{payload:snapshot});
+ await db.exec("update fixes_catalog set active=false where active=true");
+ for(const game of JSON.parse(snapshot))await template(bulk,{payload:JSON.stringify([game])});
  const catalogAfter=await db.query('select app_id::text,name,active,fix_count from fixes_catalog order by app_id');
  assert.deepEqual(catalogAfter.rows,[{app_id:'620',name:'Updated fixture',active:true,fix_count:2},{app_id:'730',name:'New fixture',active:true,fix_count:1},{app_id:'999',name:'Old fixture',active:false,fix_count:0}]);
- await template(bulk,{payload:snapshot});
+ await db.exec("update fixes_catalog set active=false where active=true");
+ for(const game of JSON.parse(snapshot))await template(bulk,{payload:JSON.stringify([game])});
  assert.equal((await db.query('select count(*)::int as count from fixes_catalog')).rows[0].count,3,'bulk snapshot rerun does not duplicate rows');
+ const beforeRollback=await db.query('select app_id::text,name,active from fixes_catalog order by app_id');
+ await db.exec('BEGIN');await db.exec('update fixes_catalog set active=false where active=true');
+ await template(bulk,{payload:JSON.stringify([{app_id:620,name:'Temporary',header_image:null,tags:[],fix_count:1}])});
+ await assert.rejects(template(bulk,{payload:JSON.stringify([{app_id:0,name:'Invalid',header_image:null,tags:[],fix_count:1}])}));
+ await db.exec('ROLLBACK');
+ assert.deepEqual((await db.query('select app_id::text,name,active from fixes_catalog order by app_id')).rows,beforeRollback.rows,'failed batch rolls back all catalog changes');
  console.log("PASS: SQL patch rerun, private RLS tables, job deduplication, lease expiry, stale-owner rejection and ready publication; multiaccount 24/day, relogin quota preservation, rollover and account eligibility; automatic host audit deduplication; catalog empty/populated array filters (temporary PostgreSQL only).");
 }finally{await db.close();}
