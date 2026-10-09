@@ -3,7 +3,7 @@ import { SELF } from 'cloudflare:test';
 import worker from "../src/index";
 import { syncListings, allowedDownloadUrl, isPublicDownloadAddress, digest, fetchFixPackage, providerAccessToken, saveProviderSession, refreshProviderSession, validateDownloadHosts, validateFix } from '../src/lib/fixes-provider';
 import { packageObjectKey, storePackage } from '../src/lib/fixes-storage';
-import { fixesAdminSyncRoute, fixesListRoute, fixesPrepareRoute, fixesDownloadRoute } from '../src/routes/fixes';
+import { fixesDetailRoute, fixesAdminSyncRoute, fixesListRoute, fixesPrepareRoute, fixesDownloadRoute } from '../src/routes/fixes';
 import { encryptAsset } from '../src/lib/asset-crypto';
 import type { Sql } from '../src/lib/db';
 import type { RouteContext } from '../src/lib/types';
@@ -421,4 +421,26 @@ it('sizes catalog batches by UTF-8 bytes and rejects oversized rows before DB ch
  expect(values.length).toBeGreaterThan(1);expect(values.every(v=>new TextEncoder().encode(v as string).byteLength<=16*1024)).toBe(true);
  let writes=0;vi.stubGlobal('fetch',vi.fn().mockResolvedValue(Response.json({games:[{...games[0],name:'x'.repeat(17000)}]})));
  await expect(syncListings(sqlMock(()=>{writes++;return [];}))).rejects.toMatchObject({code:'CATALOG_ROW_TOO_LARGE'});expect(writes).toBe(0);
+});
+
+describe('role 4 library-only Fixes',()=>{
+ it('binds account ownership to both catalog and category queries',async()=>{
+  const calls:{query:string;values:unknown[]}[]=[];
+  const response=await fixesListRoute.handle(context('/api/fixes'),undefined,sqlMock((query,values)=>{calls.push({query,values});return query.includes('access_role_code')?[{access_role_code:4}]:[];}));
+  expect(response.status).toBe(200);
+  for(const query of calls.filter(c=>c.query.includes('from fixes_catalog'))){
+   expect(query.query).toContain('owned.app_id_buy=c.app_id');expect(query.values).toContain(false);expect(query.values).toContain('12');
+  }
+ });
+ it('rejects direct detail access outside library before provider requests',async()=>{
+  const fetcher=vi.fn();vi.stubGlobal('fetch',fetcher);const calls:string[]=[];
+  const response=await fixesDetailRoute.handle(context('/api/fixes/730'),730,sqlMock(q=>{calls.push(q);return q.includes('access_role_code')?[{access_role_code:4}]:[];}));
+  expect(response.status).toBe(403);expect((await response.json() as any).code).toBe('FIXES_NOT_OWNED');
+  expect(calls.some(q=>q.includes('fixes_catalog'))).toBe(false);expect(fetcher).not.toHaveBeenCalled();
+ });
+ it.each([2,3])('keeps the full catalog available for role %s',async(role)=>{
+  let queryValues:unknown[]=[];
+  const response=await fixesListRoute.handle(context('/api/fixes'),undefined,sqlMock((q,v)=>{if(q.includes('access_role_code'))return [{access_role_code:role}];if(q.includes('app_id=any('))queryValues=v;return [];}));
+  expect(response.status).toBe(200);expect(queryValues).toContain(true);
+ });
 });

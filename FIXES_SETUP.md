@@ -100,7 +100,7 @@ Tidak ada panel admin web baru; operasi admin tersedia lewat CLI dan API private
 | POST | `/api/admin/fixes/host` | WRITE_TOKEN; diagnostik opsional hostname paket saja, memakai kuota upstream |
 | POST | `/api/admin/fixes/invalidate` | WRITE_TOKEN; invalidasi cache slot current revision |
 
-Role 2/3 dapat mengambil paket katalog. Role 4 harus sudah memiliki AppID dalam `user_list_game`, melalui claim existing. Fixes tidak menambahkan kepemilikan atau memotong free-claim coupon. Kuota 24/hari diterapkan pada akun provider, bukan pada user yang mengambil paket R2.
+Role 2/3 melihat dan dapat mengambil seluruh katalog. Role 4 hanya melihat daftar game, kategori dan detail untuk AppID miliknya dalam `user_list_game`, melalui claim existing. Filter ini server-side, termasuk pencarian/paginasi; bukan filter instalasi Steam lokal. Library kosong menghasilkan katalog kosong. Fixes tidak menambahkan kepemilikan atau memotong free-claim coupon. Kuota 24/hari diterapkan pada akun provider, bukan pada user yang mengambil paket R2.
 
 User tidak melihat token provider atau error auth provider. Error provider menjadi HTTP 503 generic, bukan 401 yang akan memicu logout aplikasi. Status rinci hanya pada API admin.
 

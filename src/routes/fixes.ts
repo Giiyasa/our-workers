@@ -9,7 +9,7 @@ import { FixesFailure, accountId, validateDownloadHosts, inspectPackageHost, syn
 import { startFixesJob } from '../lib/fixes-jobs';
 import { readPackage } from '../lib/fixes-storage';
 const unavailable = () => fail(503, 'Paket sementara belum tersedia. Coba lagi nanti.', 'FIXES_UNAVAILABLE');
-async function access(ctx: RouteContext, sql: Sql, appId?: number): Promise<string | Response> {
+async function access(ctx: RouteContext, sql: Sql, appId?: number): Promise<{ userId: string; role: number } | Response> {
     const check = await requireSession(sql, ctx.env, ctx.request, ctx.request.headers.get('x-user-id'));
     if (!check.ok)
         return fail(sessionFailStatus(check.code), check.error, check.code);
@@ -23,7 +23,7 @@ async function access(ctx: RouteContext, sql: Sql, appId?: number): Promise<stri
         if (!owned.length)
             return fail(403, 'Tambahkan game ke library melalui claim terlebih dahulu.', 'FIXES_NOT_OWNED');
     }
-    return userId;
+    return {userId,role};
 }
 function sessionPrepare(ctx: RouteContext) {
     const pre = preflightSession(ctx.request, ctx.env);
@@ -50,10 +50,15 @@ export const fixesListRoute: DbRoute = {
         // Explicit validated array text: postgres.js fetch_types:false cannot infer empty bigint arrays.
         const installedArray = `{${installed.join(',')}}`;
         const rows = await sql `select app_id::text as appid,name,header_image,fix_count as "fixCount",tags,count(*) over()::int as total
-   from fixes_catalog where active=true and (${q}='' or name ilike ${'%' + q + '%'} or app_id::text=${q})
+   from fixes_catalog c where active=true
+   and (${user.role !== 4} or exists(select 1 from ${sql(TABLE_USER_LIST_GAME)} owned
+     where owned.user_id=${user.userId}::bigint and owned.app_id_buy=c.app_id))
+   and (${q}='' or name ilike ${'%' + q + '%'} or app_id::text=${q})
    and (${tag}='' or exists(select 1 from jsonb_array_elements(tags) t where t->>'slug'=${tag} or t->>'id'=${tag}))
    and (${idsRaw === null} or app_id=any(${installedArray}::bigint[])) order by lower(name),app_id limit ${limit} offset ${(Math.floor(page) - 1) * limit}`;
-        const tags = await sql `select distinct t as tag from fixes_catalog,jsonb_array_elements(tags) t where active=true`;
+        const tags = await sql `select distinct t as tag from fixes_catalog c,jsonb_array_elements(tags) t where active=true
+   and (${user.role !== 4} or exists(select 1 from ${sql(TABLE_USER_LIST_GAME)} owned
+     where owned.user_id=${user.userId}::bigint and owned.app_id_buy=c.app_id))`;
         return json({
             ok: true,
             games: rows.map(({ total, ...g }) => g),
@@ -78,7 +83,7 @@ export const fixesDetailRoute: DbRoute<number> = {
         return Number.isSafeInteger(id) && id > 0 ? { input: id } : fail(400, 'AppID tidak valid.');
     },
     handle: async (ctx, appId, sql) => {
-        const user = await access(ctx, sql);
+        const user = await access(ctx, sql, appId);
         if (user instanceof Response)
             return user;
         const games = await sql `select app_id::text as appid,name,header_image,tags,details_synced_at,coalesce(details_synced_at>now()-interval '1 hour',false) as fresh from fixes_catalog where app_id=${appId}::bigint and active=true`;
@@ -134,7 +139,7 @@ async function packageAccess(ctx: RouteContext, sql: Sql, input: PackageInput) {
     if (!(input.slot === 'fix' ? snapshot.hasFix : snapshot.hasManifest))
         return fail(404, 'Jenis paket tidak tersedia.');
     return {
-        userId: granted,
+        userId: granted.userId,
         appId: Number(entry.app_id),
         filename: safeFilename(input.slot === 'fix' ? (snapshot.fixFilename ?? `${entry.app_id}_fix.zip`) : (snapshot.manifestFilename ?? `${entry.app_id}.zip`), input.slot),
     };

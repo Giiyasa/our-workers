@@ -55,7 +55,7 @@ import { claimInvoiceRoute } from "./routes/claim-invoice";
 import { claimGameRoute } from "./routes/claim-game";
 import { accountRoute } from "./routes/account";
 import { claimStatusRoute } from "./routes/claim-status";
-import { curatedRoute } from "./routes/curated";
+import { curatedRoute, homeSyncRoute } from "./routes/curated";
 import { consumeAssetJob, type AssetMessage } from "./lib/asset-jobs";
 import { consumeFixesJob, type FixesMessage } from "./lib/fixes-jobs";
 import { fixesRoutes } from "./routes/fixes";
@@ -91,6 +91,7 @@ const ROUTES: RouteDef[] = [
 	claimGameRoute,
 	claimStatusRoute,
 	curatedRoute,
+	homeSyncRoute,
 	...fixesRoutes,
 	// --- account: satu GET untuk halaman Account FE (profil + owned + history)
 	accountRoute,
@@ -115,7 +116,12 @@ function matchRoute(
 	return match.slice(1);
 }
 
+import { syncHomeFeed } from './lib/home-feed';
 export default {
+ async scheduled(_event: ScheduledController, env: Env): Promise<void> {
+  const sql = createDb(env);
+  try { await syncHomeFeed(sql,new Date(),(env as Env & {STEAM_API_KEY?:string}).STEAM_API_KEY); } finally { await sql.end({timeout:5}); }
+ },
 	async queue(batch: MessageBatch<AssetMessage | FixesMessage>, env: Env): Promise<void> {
 		for (const message of batch.messages) {
             if (!message.body || typeof message.body !== "object") { message.ack(); continue; }
@@ -137,6 +143,11 @@ export default {
 	async fetch(request, env, ctx): Promise<Response> {
 		const url = new URL(request.url);
 		const path = url.pathname;
+        const homeCacheKey = new Request(`${url.origin}/api/curated`, {method:'GET'});
+        if (request.method === 'GET' && path === '/api/curated') {
+            const cached = await caches.default.match(homeCacheKey);
+            if (cached) return cached;
+        }
 
 		// ------------------------------------------------------------------
 		// 1. Cocokkan rute. Rute tak dikenal ditolak di sini — belum ada
@@ -210,7 +221,12 @@ export default {
 
 			const sql = createDb(env);
 			try {
-				return await route.handle(context, input.input, sql);
+				const response = await route.handle(context, input.input, sql);
+                if (path === '/api/curated' && response.ok) {
+                    response.headers.set('Cache-Control','public, max-age=300');
+                    ctx.waitUntil(caches.default.put(homeCacheKey,response.clone()));
+                }
+                return response;
 			} finally {
 				// waitUntil, BUKAN await: jangan menahan respons sampai
 				// koneksi tutup.

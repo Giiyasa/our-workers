@@ -1,0 +1,9 @@
+import {PGlite} from '@electric-sql/pglite';
+import {readFileSync} from 'node:fs';
+const db=new PGlite();
+await db.exec('create role anon; create role authenticated;');
+await db.exec(readFileSync('supabase/HOME_FEED_PATCH.sql','utf8'));
+await db.query("insert into home_feed(section,entries) values('most_played',$1::text::jsonb)",[JSON.stringify([{appid:2,rank:1}])]);
+let rejected=false;try{await db.query("update home_feed set entries=$1::text::jsonb",[JSON.stringify(Array.from({length:26},()=>({appid:2,rank:1})))]);}catch{rejected=true;}if(!rejected)throw new Error('Missing 25-entry cap');
+console.log('Home migration, JSON snapshot and 25-entry constraint passed');
+await db.close();

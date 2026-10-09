@@ -6,7 +6,7 @@ const db=new PGlite();
 const revision="a".repeat(64),old="aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",newToken="bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 const source=await readFile(new URL("../src/lib/fixes-jobs.ts",import.meta.url),"utf8");
 const queries=[...source.matchAll(/(?:sql|tx)\s*`([\s\S]*?)`/g)].map(m=>m[1]);
-function template(raw,variables){let args=[];const sql=raw.replace(/\$\{([^}]+)\}/g,(_,name)=>{if(!(name in variables))throw new Error(`Missing fixture binding ${name}`);args.push(variables[name]);return `$${args.length}`;});return db.query(sql,args);}
+function template(raw,variables){let args=[];const sql=raw.replace(/\$\{([^}]+)\}/g,(_,name)=>{if(name==='sql(TABLE_USER_LIST_GAME)')return '"user_list_game"';if(!(name in variables))throw new Error(`Missing fixture binding ${name}`);args.push(variables[name]);return `$${args.length}`;});return db.query(sql,args);}
 const start=queries.find(q=>q.includes("insert into fixes_package_jobs"));
 const acquire=queries.find(q=>q.includes("work_started_at=now()")||q.includes("work_started_at = now()"));
 const publish=queries.find(q=>q.includes("status='ready'")||q.includes("status = 'ready'"));
@@ -76,10 +76,23 @@ try{
  const routeSource=await readFile(new URL('../src/routes/fixes.ts',import.meta.url),'utf8');
  const routeQueries=[...routeSource.matchAll(/(?:sql|tx)\s*`([\s\S]*?)`/g)].map(m=>m[1]);
  const catalog=routeQueries.find(q=>q.includes('app_id=any('));assert.ok(catalog);
- const catalogVars={q:'',"'%' + q + '%'":'%',tag:'',limit:24,'(Math.floor(page) - 1) * limit':0};
+ await db.exec('create table user_list_game(user_id bigint,app_id_buy bigint);');
+ const catalogVars={'user.role !== 4':true,'user.userId':'12',q:'',"'%' + q + '%'":'%',tag:'',limit:24,'(Math.floor(page) - 1) * limit':0};
  assert.equal((await template(catalog,{...catalogVars,'idsRaw === null':true,installedArray:'{}'})).rows.length,1,'empty installed list is valid and all catalog games are returned');
  assert.equal((await template(catalog,{...catalogVars,'idsRaw === null':false,installedArray:'{}'})).rows.length,0,'empty My games filter returns none');
  assert.equal((await template(catalog,{...catalogVars,'idsRaw === null':false,installedArray:'{620,730}'})).rows.length,1,'installed AppIDs filter works');
+ // Actual list and tag SQL: role 4 only gets its own account's library.
+ await db.query("insert into fixes_catalog(app_id,name,tags)values(730,'Other fixture',$1::jsonb)",[JSON.stringify([{id:'other',name:'Other',slug:'other'}])]);
+ await db.query("update fixes_catalog set tags=$1::jsonb where app_id=620",[JSON.stringify([{id:'owned',name:'Owned',slug:'owned'}])]);
+ await db.exec('insert into user_list_game(user_id,app_id_buy)values(12,620),(12,620),(99,730)');
+ const ownVars={...catalogVars,'user.role !== 4':false,'idsRaw === null':true,installedArray:'{}'};
+ const ownGames=await template(catalog,ownVars);assert.deepEqual(ownGames.rows.map(g=>g.appid),['620']);assert.equal(ownGames.rows[0].total,1,'owned duplicates do not inflate pagination');
+ assert.equal((await template(catalog,{...ownVars,'user.userId':'13'})).rows.length,0,'empty library sees no catalog');
+ assert.equal((await template(catalog,{...ownVars,q:'730',"'%' + q + '%'":'%730%'})).rows.length,0,'AppID search cannot reveal unowned game');
+ const tagQuery=routeQueries.find(q=>q.includes('select distinct t as tag'));assert.ok(tagQuery);
+ assert.deepEqual((await template(tagQuery,ownVars)).rows.map(r=>r.tag.id),['owned'],'categories only reflect owned catalog');
+ assert.equal((await template(catalog,{...ownVars,'user.role !== 4':true})).rows.length,2,'privileged roles retain full catalog');
+ await db.exec('delete from fixes_catalog where app_id=730');
  const bulk=providerQueries.find(q=>q.includes('with incoming as ('));assert.ok(bulk);
  const snapshot=JSON.stringify([{app_id:620,name:'Updated fixture',header_image:null,tags:[],fix_count:2},{app_id:730,name:'New fixture',header_image:null,tags:[],fix_count:1}]);
  // Reproduce the actual driver serializer: direct jsonb inference wraps JSON text as a JSON string.

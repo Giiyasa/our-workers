@@ -25,6 +25,7 @@
 		"enabled": true,
 	},
 	"upload_source_maps": true,
+	"triggers": {"crons": ["0 */12 * * *"]},
 	"queues": {
 		"producers": [{ "binding": "ASSET_QUEUE", "queue": "game-asset-fetch" }, { "binding": "FIXES_QUEUE", "queue": "fixes-package-fetch" }],
 		"consumers": [{ "queue": "game-asset-fetch", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 4, "dead_letter_queue": "game-asset-fetch-dlq" }, { "queue": "fixes-package-fetch", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 2, "dead_letter_queue": "fixes-package-fetch-dlq" }],

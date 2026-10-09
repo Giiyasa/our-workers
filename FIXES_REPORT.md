@@ -15,7 +15,7 @@ Operasi admin tersedia lewat `scripts/fixes-admin.mjs`: login PKCE, refresh, sta
 | Pemeriksaan | Hasil |
 |---|---|
 | Worker TypeScript | Lulus |
-| Worker tests | 257 lulus |
+| Worker tests | 261 lulus |
 | PostgreSQL sementara | Patch rerun/RLS/dedup/lease/stale owner/publication, kuota 24 untuk dua akun, relogin preservation, rollover dan eligibility lulus |
 | Admin CLI fixture | Routing multiaccount refresh/disable/hosts/invalidation dan kerahasiaan input rusak lulus |
 | Worker deploy dry-run | Lulus; tidak deploy |
@@ -52,3 +52,5 @@ Host otomatis: HTTPS/domain/DNS publik dan redirect diperiksa; tidak bergantung 
 9 Oktober 2026: produksi melaporkan CONNECTION_CLOSED pada write_catalog; koneksi berhasil melewati lock tetapi terputus saat bulk write. Payload kini dibatasi 16 KiB UTF-8 per batch, dalam transaksi yang sama. Tes ukuran/batching/rerun/rollback seluruh snapshot lulus. Ukuran payload sebagai penyebab transport belum terkonfirmasi; perlu deploy/uji produksi. Tidak ada perubahan konfigurasi DB/TLS/auth.
 
 9 Oktober 2026: SQLSTATE 22023 pada batch pertama dapat direproduksi ketika serializer JSON postgres.js mengenkode ulang payload string JSON. Batch sekarang menggunakan ::text::jsonb agar tipe parameter adalah text sebelum parse jsonb. Regresi memakai serializer aktual postgres.js dan PostgreSQL sementara: double encoding menghasilkan 22023, text binding menghasilkan recordset valid. Worker produksi belum diuji ulang.
+
+9 Oktober 2026: role 4 hanya dapat melihat katalog/tags/detail milik user_id pada user_list_game. Pencarian dan total paginasi dihitung setelah ownership filter, memakai EXISTS agar library duplikat tidak menggandakan hasil. Detail langsung di luar library ditolak sebelum provider fetch. Role 2/3 tetap mendapat katalog penuh. Regresi Worker dan query PostgreSQL sementara lulus. Deploy Worker dan muat ulang menu Fixes untuk mengambil hasil baru; tidak ada migrasi atau perubahan frontend untuk fitur ini.

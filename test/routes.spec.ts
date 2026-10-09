@@ -31,6 +31,7 @@ describe("tabel rute", () => {
 			"POST /api/claim-game",
 			"GET /api/claim/status/:app_id",
 			"GET /api/curated",
+            "POST /api/admin/home/sync",
    "GET /api/fixes",
    "GET /api/fixes/package",
    "POST /api/fixes/prepare",

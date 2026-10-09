@@ -16,6 +16,7 @@
  *   }
  */
 
+import { syncHomeFeed } from '../lib/home-feed';
 import { TABLE_GAME } from '../config';
 import { json } from '../lib/http';
 import { shapeGame } from '../shape';
@@ -127,7 +128,12 @@ export const curatedRoute: DbRoute = {
 	requiresDb: true,
 	prepare: () => ({ input: undefined }),
 	handle: async ({}, _input, sql) => {
-		const weekKey = isoWeekKey();
+		const feed = await sql`select f.section, f.updated_at as feed_updated_at, f.source_period, g.* from home_feed f
+ cross join lateral jsonb_to_recordset(f.entries) as e(appid bigint, rank integer)
+ join game_lists g on g.app_id=e.appid order by f.section,e.rank`;
+        const mostPlayed = feed.filter(row => row.section === 'most_played');
+        const newReleases = feed.filter(row => row.section === 'popular_new_releases');
+        const weekKey = isoWeekKey();
 		const wkSeed = seedFromKey(weekKey);
 		const dKey = dayKey();
 		const daySeed = seedFromKey(dKey);
@@ -184,8 +190,17 @@ export const curatedRoute: DbRoute = {
 		return json({
 			ok: true,
 			week: weekKey,
+            most_played: mostPlayed.map(shapeGame),
+            popular_new_releases: newReleases.map(shapeGame),
+            feed_updated_at: mostPlayed[0]?.feed_updated_at ?? null,
+            releases_period: newReleases[0]?.source_period ?? null,
 			our_picks: picks.length ? picks.map(shapeGame) : [],
 			hero: heroRows.length ? shapeGame(heroRows[0]) : null,
 		});
 	},
+};
+
+export const homeSyncRoute: DbRoute = {
+ method:'POST',path:'/api/admin/home/sync',token:'write',requiresDb:true,
+ handle:async (_ctx,_input,sql) => json({ok:true,sections:await syncHomeFeed(sql,new Date(),(_ctx.env as Env & {STEAM_API_KEY?:string}).STEAM_API_KEY)}),
 };
