@@ -3,7 +3,7 @@ import { SELF } from 'cloudflare:test';
 import worker from "../src/index";
 import { syncListings, allowedDownloadUrl, isPublicDownloadAddress, digest, fetchFixPackage, providerAccessToken, saveProviderSession, refreshProviderSession, validateDownloadHosts, validateFix } from '../src/lib/fixes-provider';
 import { packageObjectKey, storePackage } from '../src/lib/fixes-storage';
-import { fixesListRoute, fixesPrepareRoute, fixesDownloadRoute } from '../src/routes/fixes';
+import { fixesAdminSyncRoute, fixesListRoute, fixesPrepareRoute, fixesDownloadRoute } from '../src/routes/fixes';
 import { encryptAsset } from '../src/lib/asset-crypto';
 import type { Sql } from '../src/lib/db';
 import type { RouteContext } from '../src/lib/types';
@@ -376,5 +376,23 @@ describe('catalog bulk sync',()=>{
    await expect(syncListings(sqlMock(()=>{writes++;return [];}))).rejects.toMatchObject({code:'CATALOG_FORMAT'});
    expect(writes).toBe(0);
   }
+ });
+});
+
+describe('admin sync failure diagnostics',()=>{
+ it('reports provider status without exposing tokens or response bodies',async()=>{
+  vi.stubGlobal('fetch',vi.fn().mockResolvedValue(new Response('secret-upstream-body',{status:403})));
+  const response=await fixesAdminSyncRoute.handle(context('/api/admin/fixes/sync'),null,sqlMock(()=>[]));
+  expect(response.status).toBe(503);const data=await response.json() as any;
+  expect(data.code).toBe('PROVIDER_AUTH');expect(data.upstream_status).toBe(403);
+  expect(JSON.stringify(data)).not.toContain('secret-upstream-body');
+ });
+ it('reports SQLSTATE without including database error details',async()=>{
+  vi.stubGlobal('fetch',vi.fn().mockResolvedValue(Response.json({games:[{appid:'620',name:'Fixture',tags:[],fixCount:1}]})));
+  const error=Object.assign(new Error('postgres://secret-user:secret-password@db/secret'),{code:'42P01'});
+  const response=await fixesAdminSyncRoute.handle(context('/api/admin/fixes/sync'),null,sqlMock(()=>{throw error;}));
+  expect(response.status).toBe(503);const data=await response.json() as any;
+  expect(data.code).toBe('SYNC_DB_FAILED');expect(data.db_code).toBe('42P01');
+  expect(JSON.stringify(data)).not.toContain('secret');
  });
 });

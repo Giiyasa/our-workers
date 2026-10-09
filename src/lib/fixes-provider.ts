@@ -29,7 +29,7 @@ export interface FixGame {
     tags: FixTag[];
 }
 export class FixesFailure extends Error {
-    constructor(public code: string) {
+    constructor(public code: string, public upstreamStatus?: number) {
         super('Paket sementara belum tersedia. Coba lagi nanti.');
     }
 }
@@ -95,7 +95,7 @@ async function jsonFetch(url: string, headers?: Record<string, string>): Promise
     }
     if (!res.ok) {
         await res.body?.cancel();
-        throw new FixesFailure(res.status === 401 || res.status === 403 ? 'PROVIDER_AUTH' : res.status === 429 ? 'PROVIDER_LIMIT' : 'PROVIDER_HTTP');
+        throw new FixesFailure(res.status === 401 || res.status === 403 ? 'PROVIDER_AUTH' : res.status === 429 ? 'PROVIDER_LIMIT' : 'PROVIDER_HTTP', res.status);
     }
     const reader = res.body?.getReader();
     if (!reader)

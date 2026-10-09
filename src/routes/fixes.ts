@@ -324,7 +324,14 @@ export const fixesAdminSyncRoute: DbRoute<number | null> = {
             return json({ ok: true, count: await syncListings(sql) });
         }
         catch (e) {
-            return fail(503, 'Sinkronisasi provider gagal.', e instanceof FixesFailure ? e.code : 'SYNC_FAILED');
+            // Admin-only diagnostic fields; never return DB messages, URLs or tokens.
+            const dbCode = e && typeof e === 'object' && 'code' in e &&
+                typeof e.code === 'string' && /^[0-9A-Z]{5}$/.test(e.code) ? e.code : undefined;
+            const code = e instanceof FixesFailure ? e.code : dbCode ? 'SYNC_DB_FAILED' : 'SYNC_FAILED';
+            console.error('fixes_sync_failed', {code,db_code:dbCode,upstream_status:e instanceof FixesFailure ? e.upstreamStatus : undefined});
+            return json({ok:false,error:'Sinkronisasi katalog gagal.',code,
+                ...(dbCode ? {db_code:dbCode} : {}),
+                ...(e instanceof FixesFailure && e.upstreamStatus ? {upstream_status:e.upstreamStatus} : {})},503);
         }
     },
 };

@@ -21,8 +21,21 @@ async function admin(path, body, method = 'POST') {
 		body: method === 'GET' ? undefined : JSON.stringify(body ?? {}),
 		signal: AbortSignal.timeout(120_000),
 	});
-	const data = await res.json();
-	if (!res.ok) throw new Error(`Admin request failed: HTTP ${res.status} (${data.code ?? 'ADMIN_FAILED'}).`);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+        const code = typeof data.code === 'string' && /^[A-Z0-9_]{1,60}$/.test(data.code) ? data.code : 'ADMIN_FAILED';
+        const details = [];
+        if(Number.isInteger(data.upstream_status) && data.upstream_status >= 100 && data.upstream_status <= 599)
+            details.push(`LuaTools HTTP ${data.upstream_status}`);
+        if(typeof data.db_code === 'string' && /^[0-9A-Z]{5}$/.test(data.db_code)) {
+            details.push(`PostgreSQL ${data.db_code}`);
+            const hints={"42P01":"Tabel belum tersedia pada database yang diakses Worker.","42501":"Role database Worker tidak mempunyai izin tabel.","22P02":"Format parameter database tidak valid.","57014":"Query database dibatalkan atau timeout."};
+            if(hints[data.db_code])details.push(hints[data.db_code]);
+        }
+        if(code==='PROVIDER_AUTH')details.push('Provider menolak request; jika ini sync, penolakan katalog bukan bukti token akun kedaluwarsa.');
+        if(code==='PROVIDER_NETWORK')details.push('Koneksi ke provider gagal atau timeout.');
+        throw new Error(`Admin request failed: HTTP ${res.status} (${code}). ${details.join(' ')}`.trim());
+    }
 	return data;
 }
 async function login() {
