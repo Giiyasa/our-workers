@@ -161,7 +161,7 @@ describe('R2 cache', () => {
         expect(res.status).toBe(403);
         expect(fetcher).not.toHaveBeenCalled();
     });
-    it('download forwards cached bytes without any provider/user quota writes', async () => {
+    it('cached download consumes shared user quota but no provider quota', async () => {
         const calls: string[] = [];
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(new Uint8Array([1, 2, 3, 4]))));
         const sql = sqlMock((query) => {
@@ -180,15 +180,28 @@ describe('R2 cache', () => {
                                 sha256: revision,
                             },
                         ]
-                        : query.includes('fixes_download_usage')
-                            ? [{ user_id: 12 }]
+                        : query.includes('insert into user_download_daily_usage')
+                            ? [{ download_count: 1 }]
                             : [];
         });
         const res = await fixesDownloadRoute.handle(context('/api/fixes/package'), input, sql);
         expect(res.status).toBe(200);
         expect(new Uint8Array(await res.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3, 4]));
         expect(calls.some((q) => q.includes('fixes_download_usage') || q.includes('fixes_provider_usage') || q.includes('fixes_provider_accounts'))).toBe(false);
-        expect(calls.some((q) => q.includes('free_claim_game') || q.includes('user_download_daily_usage'))).toBe(false);
+        expect(calls.some((q) => q.includes('free_claim_game'))).toBe(false);
+        expect(calls.filter(q => q.includes('insert into user_download_daily_usage'))).toHaveLength(1);
+    });
+    it('rejects exhausted shared user quota before storage or provider access', async () => {
+        const fetcher = vi.fn(); vi.stubGlobal('fetch', fetcher);
+        const sql = sqlMock(q => q.includes('access_role_code') ? [{access_role_code:3}]
+            : q.includes('select e.app_id') ? [{app_id:620,snapshot:snap,revision}]
+            : q.includes('select download_count') ? [{download_count:25,daily_limit:50}] : []);
+        for (const route of [fixesPrepareRoute, fixesDownloadRoute]) {
+            const res = await route.handle(context('/api/fixes/package'), input, sql);
+            expect(res.status).toBe(429);
+            expect((await res.json() as {code:string}).code).toBe('DOWNLOAD_LIMIT');
+        }
+        expect(fetcher).not.toHaveBeenCalled();
     });
     it('streamed multipart upload hashes all bytes and publishes only after completion', async () => {
         const bytes = new Uint8Array(9 * 1024 * 1024);

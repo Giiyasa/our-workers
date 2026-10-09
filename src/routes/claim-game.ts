@@ -28,7 +28,7 @@ export const claimGameRoute: DbRoute<{ gameId: number }> = {
 		const users = await sql`select access_role_code, free_claim_game from ${sql(TABLE_USER)} where user_id = ${userId}::bigint`;
 		const user = users[0];
 		if (!user || ![2, 3, 4].includes(Number(user.access_role_code))) return fail(403, "Role akun tidak memiliki akses claim game.", "CLAIM_FORBIDDEN");
-		if (!(await downloadAllowance(sql, userId))) return fail(429, "Batas 50 unduhan untuk sesi 12 jam ini sudah tercapai.", "DOWNLOAD_LIMIT");
+		if (!(await downloadAllowance(sql, userId))) return fail(429, "Batas 25 unduhan untuk sesi 12 jam ini sudah tercapai (50 per hari).", "DOWNLOAD_LIMIT");
 		// Check eligibility before spending provider resources, then recheck inside the final transaction.
 		if (Number(user.access_role_code) === 4) {
 			const owned = await sql`select 1 from ${sql(TABLE_USER_LIST_GAME)} where user_id = ${userId}::bigint and app_id_buy = ${gameId}::bigint limit 1`;
@@ -74,7 +74,7 @@ export const claimGameRoute: DbRoute<{ gameId: number }> = {
 		} catch (error) {
 			if (!(error instanceof ClaimRejected)) throw error;
 			return fail(error.code === "DOWNLOAD_LIMIT" ? 429 : 403,
-				error.code === "DOWNLOAD_LIMIT" ? "Batas 50 unduhan untuk sesi 12 jam ini sudah tercapai." : error.code === "FREE_CLAIM_HABIS" ? "Kuota free claim habis." : "Role akun tidak memiliki akses claim game.", error.code);
+				error.code === "DOWNLOAD_LIMIT" ? "Batas 25 unduhan untuk sesi 12 jam ini sudah tercapai (50 per hari)." : error.code === "FREE_CLAIM_HABIS" ? "Kuota free claim habis." : "Role akun tidak memiliki akses claim game.", error.code);
 		}
 		return response;
 	},

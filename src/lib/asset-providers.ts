@@ -53,6 +53,8 @@ export async function readLua(response: Response): Promise<Uint8Array> {
 	return bytes;
 }
 
+const HUBCAP_DAILY_LIMIT = 24;
+
 interface ProviderKey { id: string; key: string }
 function providerKeys(env: Env): ProviderKey[] {
 	try {
@@ -95,7 +97,7 @@ async function refreshStats(sql: Sql, config: ProviderKey): Promise<void> {
 		await sql`
 			update provider_key_usage set
 				daily_usage_count = ${used} + greatest(in_flight_count, daily_usage_count - ${Number(locked[0].daily_usage_count)}),
-				daily_limit = ${limit}, last_provider_daily_usage = ${used},
+				daily_limit = ${Math.min(limit, HUBCAP_DAILY_LIMIT)}, last_provider_daily_usage = ${used},
 				blocked_until = case when ${stats.can_make_requests} then null else now() + interval '60 seconds' end,
 				stats_checked_at = now(), stats_token = null, stats_lease_until = null, updated_at = now()
 			where provider_key_id = ${config.id} and stats_token = ${token}::uuid
@@ -111,7 +113,7 @@ async function hubcap(sql: Sql, env: Env, gameId: number): Promise<Uint8Array | 
 	const configs = providerKeys(env);
 	if (!configs.length) throw new AssetFailure("PROVIDER_CONFIG", "Key provider 3 belum dikonfigurasi.");
 	for (const config of configs) {
-		await sql`insert into provider_key_usage (provider_key_id) values (${config.id}) on conflict do nothing`;
+		await sql`insert into provider_key_usage (provider_key_id, daily_limit) values (${config.id}, ${HUBCAP_DAILY_LIMIT}) on conflict do nothing`;
 	}
 	const order = await sql`select provider_key_id from provider_key_usage
 		where enabled and provider_key_id in ${sql(configs.map((key) => key.id))}
@@ -124,7 +126,7 @@ async function hubcap(sql: Sql, env: Env, gameId: number): Promise<Uint8Array | 
 			const rows = await tx`update provider_key_usage
 			set daily_usage_count = daily_usage_count + 1, in_flight_count = in_flight_count + 1,
 				last_reserved_at = now(), updated_at = now()
-			where provider_key_id = ${config.id} and enabled and daily_usage_count < daily_limit
+			where provider_key_id = ${config.id} and enabled and daily_usage_count < least(daily_limit, ${HUBCAP_DAILY_LIMIT})
 				and (blocked_until is null or blocked_until <= now())
 				and (stats_lease_until is null or stats_lease_until <= now())
 			returning provider_key_id`;

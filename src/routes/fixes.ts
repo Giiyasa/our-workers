@@ -1,3 +1,4 @@
+import { downloadAllowance, reserveDownload } from "../lib/download-limit";
 import { FIXES_CONFIG } from '../fixes-config.mjs';
 import { TABLE_USER, TABLE_USER_LIST_GAME } from '../config';
 import { readJsonBody } from '../lib/body';
@@ -8,6 +9,7 @@ import type { Sql } from '../lib/db';
 import { FixesFailure, accountId, validateDownloadHosts, inspectPackageHost, syncListings, syncDetails, saveProviderSession, refreshProviderSession, safeFilename, type Slot, type FixEntry, } from '../lib/fixes-provider';
 import { startFixesJob } from '../lib/fixes-jobs';
 import { readPackage } from '../lib/fixes-storage';
+const downloadLimited = () => fail(429, "Batas 25 unduhan untuk sesi 12 jam ini sudah tercapai (50 per hari).", "DOWNLOAD_LIMIT");
 const unavailable = () => fail(503, 'Paket sementara belum tersedia. Coba lagi nanti.', 'FIXES_UNAVAILABLE');
 async function access(ctx: RouteContext, sql: Sql, appId?: number): Promise<{ userId: string; role: number } | Response> {
     const check = await requireSession(sql, ctx.env, ctx.request, ctx.request.headers.get('x-user-id'));
@@ -168,6 +170,7 @@ export const fixesPrepareRoute: DbRoute<PackageInput> = {
             const allowed = await packageAccess(ctx, sql, input);
             if (allowed instanceof Response)
                 return allowed;
+            if (!(await downloadAllowance(sql, allowed.userId))) return downloadLimited();
             const current = await job(sql, input);
             if (current?.status === 'ready') {
                 const head = await readPackage(ctx.env, current.r2_object_key, 'HEAD');
@@ -216,6 +219,7 @@ export const fixesDownloadRoute: DbRoute<PackageInput> = {
             const allowed = await packageAccess(ctx, sql, input);
             if (allowed instanceof Response)
                 return allowed;
+            if (!(await downloadAllowance(sql, allowed.userId))) return downloadLimited();
             const current = await job(sql, input);
             if (current?.status !== 'ready')
                 return unavailable();
@@ -224,8 +228,8 @@ export const fixesDownloadRoute: DbRoute<PackageInput> = {
                 await source.body?.cancel();
                 return unavailable();
             }
-            // Serving cached R2 bytes consumes no upstream provider account quota.
-            return new Response(source.body, {
+            // Cached bytes use the shared user quota, without an upstream request.
+            const response = new Response(source.body, {
                 headers: {
                     'content-type': 'application/octet-stream',
                     'content-length': String(current.size_bytes),
@@ -234,6 +238,17 @@ export const fixesDownloadRoute: DbRoute<PackageInput> = {
                     'cache-control': 'no-store',
                 },
             });
+            try {
+                const reserved = await sql.begin(tx => reserveDownload(tx, allowed.userId));
+                if (!reserved) {
+                    await source.body.cancel();
+                    return downloadLimited();
+                }
+            } catch (error) {
+                await source.body.cancel().catch(() => {});
+                throw error;
+            }
+            return response;
         }
         catch (error) {
             console.error('fixes_download_failed', { code: error instanceof FixesFailure ? error.code : 'FIXES_FAILED' });
