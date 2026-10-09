@@ -1,3 +1,4 @@
+import {types as postgresTypes} from '../node_modules/postgres/src/types.js';
 import { PGlite } from "@electric-sql/pglite";
 import { readFile } from "node:fs/promises";
 import assert from "node:assert/strict";
@@ -81,6 +82,11 @@ try{
  assert.equal((await template(catalog,{...catalogVars,'idsRaw === null':false,installedArray:'{620,730}'})).rows.length,1,'installed AppIDs filter works');
  const bulk=providerQueries.find(q=>q.includes('with incoming as ('));assert.ok(bulk);
  const snapshot=JSON.stringify([{app_id:620,name:'Updated fixture',header_image:null,tags:[],fix_count:2},{app_id:730,name:'New fixture',header_image:null,tags:[],fix_count:1}]);
+ // Reproduce the actual driver serializer: direct jsonb inference wraps JSON text as a JSON string.
+ await assert.rejects(db.query('select * from jsonb_to_recordset($1::jsonb) as g(app_id bigint)',[postgresTypes.json.serialize(snapshot)]),error=>error.code==='22023');
+ const textPayload=postgresTypes.string.serialize(snapshot);
+ assert.ok(bulk.includes('${payload}::text::jsonb'),'batch explicitly binds text, not inferred jsonb');
+ assert.equal((await template(bulk,{payload:textPayload})).rows[0].count,2,'actual driver text serializer produces a valid recordset');
  await db.exec("insert into fixes_catalog(app_id,name)values(999,'Old fixture')");
  await db.exec("update fixes_catalog set active=false where active=true");
  for(const game of JSON.parse(snapshot))await template(bulk,{payload:JSON.stringify([game])});

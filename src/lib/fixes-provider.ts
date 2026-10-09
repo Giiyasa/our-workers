@@ -174,10 +174,12 @@ export async function syncListings(sql: Sql, onStage: (stage: string) => void = 
         // All writes are in the same transaction; any failed batch rolls back this change too.
         await tx`update fixes_catalog set active=false where active=true`;
         for (let index=0;index<batches.length;index++) {
+            // payload is already JSON text. Bind as PostgreSQL text before casting to jsonb
+            // to prevent postgres.js JSON serialization from encoding it a second time.
             const payload=batches[index];
             onStage(`write_catalog_batch_${index+1}_of_${batches.length}`);
             await tx`with incoming as (
- select * from jsonb_to_recordset(${payload}::jsonb)
+ select * from jsonb_to_recordset(${payload}::text::jsonb)
  as g(app_id bigint,name text,header_image text,tags jsonb,fix_count integer)
 ), saved as (
  insert into fixes_catalog(app_id,name,header_image,tags,fix_count,active)

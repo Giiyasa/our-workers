@@ -368,7 +368,7 @@ describe('catalog bulk sync',()=>{
   expect(calls[0].query).toContain('pg_advisory_xact_lock');
   expect(calls[1].query).toContain('set active=false');
   const batches=calls.slice(2);
-  expect(batches.every(c=>c.query.includes('jsonb_to_recordset')&&new TextEncoder().encode(c.values[0] as string).byteLength<=16*1024)).toBe(true);
+  expect(batches.every(c=>c.query.includes('jsonb_to_recordset')&&c.query.includes('::text::jsonb')&&new TextEncoder().encode(c.values[0] as string).byteLength<=16*1024)).toBe(true);
   expect(batches.flatMap(c=>JSON.parse(c.values[0] as string))).toHaveLength(500);
  });
  it('does not change existing catalog when upstream snapshot is empty or duplicated',async()=>{
