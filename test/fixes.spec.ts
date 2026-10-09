@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { SELF } from 'cloudflare:test';
 import worker from "../src/index";
-import { allowedDownloadUrl, isPublicDownloadAddress, digest, fetchFixPackage, providerAccessToken, saveProviderSession, refreshProviderSession, validateDownloadHosts, validateFix } from '../src/lib/fixes-provider';
+import { syncListings, allowedDownloadUrl, isPublicDownloadAddress, digest, fetchFixPackage, providerAccessToken, saveProviderSession, refreshProviderSession, validateDownloadHosts, validateFix } from '../src/lib/fixes-provider';
 import { packageObjectKey, storePackage } from '../src/lib/fixes-storage';
 import { fixesListRoute, fixesPrepareRoute, fixesDownloadRoute } from '../src/routes/fixes';
 import { encryptAsset } from '../src/lib/asset-crypto';
@@ -355,5 +355,26 @@ describe('Fixes catalog array binding',()=>{
   expect(response.status).toBe(200);
   expect(bound).toContain(arrayText);expect(bound).toContain(allGames);
   expect(bound.some(Array.isArray)).toBe(false);
+ });
+});
+
+describe('catalog bulk sync',()=>{
+ it('syncs hundreds of games with a constant number of database operations',async()=>{
+  const games=Array.from({length:500},(_,i)=>({appid:String(i+1),name:`Game ${i+1}`,tags:[],fixCount:1}));
+  vi.stubGlobal('fetch',vi.fn().mockResolvedValue(Response.json({games})));
+  const calls:{query:string;values:unknown[]}[]=[];
+  const count=await syncListings(sqlMock((query,values)=>{calls.push({query,values});return [];}));
+  expect(count).toBe(500);expect(calls).toHaveLength(2);
+  expect(calls[0].query).toContain('pg_advisory_xact_lock');
+  expect(calls[1].query).toContain('jsonb_to_recordset');
+  expect(JSON.parse(calls[1].values[0] as string)).toHaveLength(500);
+ });
+ it('does not change existing catalog when upstream snapshot is empty or duplicated',async()=>{
+  const game={appid:'620',name:'Fixture',tags:[],fixCount:1};
+  for(const games of [[],[game,game]]){
+   let writes=0;vi.stubGlobal('fetch',vi.fn().mockResolvedValue(Response.json({games})));
+   await expect(syncListings(sqlMock(()=>{writes++;return [];}))).rejects.toMatchObject({code:'CATALOG_FORMAT'});
+   expect(writes).toBe(0);
+  }
  });
 });

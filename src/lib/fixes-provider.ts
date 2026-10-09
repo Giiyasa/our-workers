@@ -144,13 +144,29 @@ export async function syncListings(sql: Sql): Promise<number> {
             throw new FixesFailure('CATALOG_FORMAT');
         return { ...g, tags: validateTags(g.tags) };
     });
-    await sql.begin(async (tx) => {
-        await tx `update fixes_catalog set active=false`;
-        for (const g of games)
-            await tx `insert into fixes_catalog(app_id,name,header_image,tags,fix_count,active)
-   values(${g.appid}::bigint,${g.name},${g.header_image ?? null},${tx.json(JSON.parse(JSON.stringify(g.tags)))},${Number(g.fixCount) || 0},true)
-   on conflict(app_id) do update set name=excluded.name,header_image=excluded.header_image,tags=excluded.tags,
-   fix_count=excluded.fix_count,active=true,synced_at=now()`;
+    if (new Set(games.map(g => String(Number(g.appid)))).size !== games.length)
+        throw new FixesFailure('CATALOG_FORMAT');
+    const payload = JSON.stringify(games.map(g => ({
+        app_id: Number(g.appid), name: g.name, header_image: g.header_image ?? null,
+        tags: g.tags, fix_count: Number(g.fixCount) || 0,
+    })));
+    // Constant number of DB round trips; serialize concurrent snapshots before publishing.
+    await sql.begin(async tx => {
+        await tx`select pg_advisory_xact_lock(53789,24)`;
+        await tx`with incoming as (
+ select * from jsonb_to_recordset(${payload}::jsonb)
+ as g(app_id bigint,name text,header_image text,tags jsonb,fix_count integer)
+), saved as (
+ insert into fixes_catalog(app_id,name,header_image,tags,fix_count,active)
+ select app_id,name,header_image,tags,fix_count,true from incoming order by app_id
+ on conflict(app_id) do update set name=excluded.name,header_image=excluded.header_image,
+ tags=excluded.tags,fix_count=excluded.fix_count,active=true,synced_at=now()
+ returning app_id
+), retired as (
+ update fixes_catalog set active=false where active=true and not exists(
+ select 1 from incoming where incoming.app_id=fixes_catalog.app_id) returning app_id
+)
+ select count(*)::int as count from saved`;
     });
     return games.length;
 }

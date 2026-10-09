@@ -79,5 +79,13 @@ try{
  assert.equal((await template(catalog,{...catalogVars,'idsRaw === null':true,installedArray:'{}'})).rows.length,1,'empty installed list is valid and all catalog games are returned');
  assert.equal((await template(catalog,{...catalogVars,'idsRaw === null':false,installedArray:'{}'})).rows.length,0,'empty My games filter returns none');
  assert.equal((await template(catalog,{...catalogVars,'idsRaw === null':false,installedArray:'{620,730}'})).rows.length,1,'installed AppIDs filter works');
+ const bulk=providerQueries.find(q=>q.includes('with incoming as ('));assert.ok(bulk);
+ const snapshot=JSON.stringify([{app_id:620,name:'Updated fixture',header_image:null,tags:[],fix_count:2},{app_id:730,name:'New fixture',header_image:null,tags:[],fix_count:1}]);
+ await db.exec("insert into fixes_catalog(app_id,name)values(999,'Old fixture')");
+ await template(bulk,{payload:snapshot});
+ const catalogAfter=await db.query('select app_id::text,name,active,fix_count from fixes_catalog order by app_id');
+ assert.deepEqual(catalogAfter.rows,[{app_id:'620',name:'Updated fixture',active:true,fix_count:2},{app_id:'730',name:'New fixture',active:true,fix_count:1},{app_id:'999',name:'Old fixture',active:false,fix_count:0}]);
+ await template(bulk,{payload:snapshot});
+ assert.equal((await db.query('select count(*)::int as count from fixes_catalog')).rows[0].count,3,'bulk snapshot rerun does not duplicate rows');
  console.log("PASS: SQL patch rerun, private RLS tables, job deduplication, lease expiry, stale-owner rejection and ready publication; multiaccount 24/day, relogin quota preservation, rollover and account eligibility; automatic host audit deduplication; catalog empty/populated array filters (temporary PostgreSQL only).");
 }finally{await db.close();}

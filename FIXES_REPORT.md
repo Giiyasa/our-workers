@@ -15,7 +15,7 @@ Operasi admin tersedia lewat `scripts/fixes-admin.mjs`: login PKCE, refresh, sta
 | Pemeriksaan | Hasil |
 |---|---|
 | Worker TypeScript | Lulus |
-| Worker tests | 250 lulus |
+| Worker tests | 252 lulus |
 | PostgreSQL sementara | Patch rerun/RLS/dedup/lease/stale owner/publication, kuota 24 untuk dua akun, relogin preservation, rollover dan eligibility lulus |
 | Admin CLI fixture | Routing multiaccount refresh/disable/hosts/invalidation dan kerahasiaan input rusak lulus |
 | Worker deploy dry-run | Lulus; tidak deploy |
@@ -42,3 +42,5 @@ Batas yang tercatat: banyak akun provider, masing-masing 24 permintaan upstream/
 Host otomatis: HTTPS/domain/DNS publik dan redirect diperiksa; tidak bergantung daftar host awal. Regresi mencakup first-download tanpa config, redirect CDN publik, penolakan IP/domain private, DNS failure, bearer isolation dan satu reservasi kuota untuk seluruh redirect. Database test mengeksekusi SQL audit host aktual. Tidak ada perubahan frontend/native atau migrasi tambahan untuk revisi ini.
 
 9 Oktober 2026: binding array AppID pada katalog diperbaiki menjadi teks array PostgreSQL eksplisit yang tervalidasi, kompatibel dengan fetch_types:false. Filter kosong My games menghasilkan daftar kosong. Regresi HTTP dan SQL nyata sementara mencakup katalog tanpa filter, filter kosong dan AppID terisi; belum diverifikasi pada Worker produksi.
+
+9 Oktober 2026: sync katalog menggunakan bulk JSON recordset, bukan query per game. Satu advisory lock transaksi dan satu SQL snapshot mengganti loop query; update/insert/deaktivasi tetap atomik. Tes 500 game membuktikan jumlah operasi DB konstan; SQL sementara memverifikasi upsert, deaktivasi dan rerun. Durasi produksi belum diukur.
