@@ -20,5 +20,6 @@ export const homeSyncRoute:DbRoute={method:'POST',path:'/api/admin/home/sync',to
  handle:async(_ctx,_input,sql)=>{
   const sections=await syncHomeFeed(sql);
   const failed='status' in sections;
+  if(!failed)await caches.default.delete(new Request(`${_ctx.url.origin}/api/curated`,{method:'GET'}));
   return json({ok:!failed,sections},failed?503:200);
  }};

@@ -222,7 +222,9 @@ export default {
 			const sql = createDb(env);
 			try {
 				const response = await route.handle(context, input.input, sql);
-                if (path === '/api/curated' && response.ok) {
+                const homeBody = path === '/api/curated' && response.ok ? await response.clone().json() as {highlights?:unknown[];trending?:unknown[];top_rated?:unknown[]} : null;
+                const hasHomeItems = Boolean(homeBody && ((homeBody.highlights?.length ?? 0) + (homeBody.trending?.length ?? 0) + (homeBody.top_rated?.length ?? 0)));
+                if (path === '/api/curated' && response.ok && hasHomeItems) {
                     response.headers.set('Cache-Control','public, max-age=300');
                     ctx.waitUntil(caches.default.put(homeCacheKey,response.clone()));
                 }
