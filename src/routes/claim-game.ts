@@ -1,4 +1,4 @@
-import { STEAM_MAX_APP_ID, TABLE_GAME, TABLE_USER, TABLE_USER_LIST_GAME } from "../config";
+import { STEAM_MAX_APP_ID, TABLE_GAME, TABLE_HISTORY_PURCHASE, TABLE_USER, TABLE_USER_LIST_GAME } from "../config";
 import { readJsonBody } from "../lib/body";
 import { fail, json } from "../lib/http";
 import { fetchR2Lua } from "../lib/r2";
@@ -33,6 +33,15 @@ export const claimGameRoute: DbRoute<{ gameId: number }> = {
 		if (Number(user.access_role_code) === 4) {
 			const owned = await sql`select 1 from ${sql(TABLE_USER_LIST_GAME)} where user_id = ${userId}::bigint and app_id_buy = ${gameId}::bigint limit 1`;
 			if (!owned.length && Number(user.free_claim_game) <= 0) return fail(403, "Kuota free claim habis. Klaim invoice untuk memiliki game ini.", "FREE_CLAIM_HABIS");
+			// Jika ada invoice yang belum dipakai (is_invoice_used = false) untuk game ini, tolak claim game.
+			if (!owned.length) {
+				const unpaidInvoice = await sql`select 1 from ${sql(TABLE_HISTORY_PURCHASE)} where user_id = ${userId}::bigint and game_id = ${gameId}::bigint and is_invoice_used = false limit 1`;
+				if (unpaidInvoice.length) return fail(403, "Invoice untuk game ini belum diklaim. Klaim invoice terlebih dahulu.", "INVOICE_BELUM_DIKLAIM");
+			}
+		} else {
+			// Role 2/3: harus pernah claim invoice (is_invoice_used = true) minimal sekali.
+			const invoiceClaimed = await sql`select 1 from ${sql(TABLE_HISTORY_PURCHASE)} where user_id = ${userId}::bigint and is_invoice_used = true limit 1`;
+			if (!invoiceClaimed.length) return fail(403, "Akun belum pernah klaim invoice. Klaim invoice terlebih dahulu.", "INVOICE_BELUM_DIKLAIM");
 		}
 		const games = await sql`select app_id, name, is_unavailable_game from ${sql(TABLE_GAME)} where app_id = ${gameId}::bigint limit 1`;
 		if (!games[0]) return fail(404, "Game tidak ada di katalog.", "GAME_NOT_FOUND");
@@ -66,15 +75,24 @@ export const claimGameRoute: DbRoute<{ gameId: number }> = {
 					const owned = await tx`select 1 from ${sql(TABLE_USER_LIST_GAME)} where user_id = ${userId}::bigint and app_id_buy = ${gameId}::bigint limit 1`;
 					if (!owned.length) {
 						if (Number(current[0]?.free_claim_game) <= 0) throw new ClaimRejected("FREE_CLAIM_HABIS");
+						// Re-check invoice inside transaction (same as outside)
+						const unpaidInvoice = await tx`select 1 from ${sql(TABLE_HISTORY_PURCHASE)} where user_id = ${userId}::bigint and game_id = ${gameId}::bigint and is_invoice_used = false limit 1`;
+						if (unpaidInvoice.length) throw new ClaimRejected("INVOICE_BELUM_DIKLAIM");
 						await tx`update ${sql(TABLE_USER)} set free_claim_game = free_claim_game - 1, updated_at = now() where user_id = ${userId}::bigint`;
 						await tx`insert into ${sql(TABLE_USER_LIST_GAME)} (user_id, app_id_buy, is_from_free_claim) values (${userId}::bigint, ${gameId}::bigint, true)`;
+					}
+				} else {
+					// Role 2/3: claim bebas, insert ke user_list_game jika belum ada.
+					const owned = await tx`select 1 from ${sql(TABLE_USER_LIST_GAME)} where user_id = ${userId}::bigint and app_id_buy = ${gameId}::bigint limit 1`;
+					if (!owned.length) {
+						await tx`insert into ${sql(TABLE_USER_LIST_GAME)} (user_id, app_id_buy, is_from_free_claim) values (${userId}::bigint, ${gameId}::bigint, false)`;
 					}
 				}
 			});
 		} catch (error) {
 			if (!(error instanceof ClaimRejected)) throw error;
 			return fail(error.code === "DOWNLOAD_LIMIT" ? 429 : 403,
-				error.code === "DOWNLOAD_LIMIT" ? "Batas 25 unduhan untuk sesi 12 jam ini sudah tercapai (50 per hari)." : error.code === "FREE_CLAIM_HABIS" ? "Kuota free claim habis." : "Role akun tidak memiliki akses claim game.", error.code);
+				error.code === "DOWNLOAD_LIMIT" ? "Batas 25 unduhan untuk sesi 12 jam ini sudah tercapai (50 per hari)." : error.code === "FREE_CLAIM_HABIS" ? "Kuota free claim habis." : error.code === "INVOICE_BELUM_DIKLAIM" ? "Invoice untuk game ini belum diklaim. Klaim invoice terlebih dahulu." : "Role akun tidak memiliki akses claim game.", error.code);
 		}
 		return response;
 	},

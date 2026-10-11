@@ -108,15 +108,60 @@ export const accountRoute: DbRoute<Record<string, never>> = {
 
 		// ------------------------------------------------------------------
 		// Role selain 4: baris klaimnya app_id_buy = 0 — tidak menunjuk game
-		// apa pun. Daftar kepemilikan sengaja balik kosong + penanda, dan FE
-		// menampilkan makna role-nya, bukan daftar kosong yang terlihat rusak.
+		// apa pun. FE tetap menerima owned_games yang sebenarnya supaya non-4
+		// bisa melihat koleksinya, tapi dikasih penanda list_game_kosong agar
+		// tahu role-nya bukan tipe invoice.
 		// ------------------------------------------------------------------
 		if (user.access_role_code !== INVOICE_CLAIM_ROLE_CODE) {
+			// Ambil owned_games dulu — user_list_game bisa berisi baris dengan
+			// app_id_buy = 0 (klaim role non-4) ATAU > 0 (dari mekanisme lain).
+			// Filter app_id_buy <> 0 di query menyingkirkan baris kosong.
+			const ownedRows = await sql<OwnedRow[]>`
+				select distinct on (app_id_buy)
+					app_id_buy, created_at
+				from ${sql(TABLE_USER_LIST_GAME)}
+				where user_id = ${userId}::int8
+					and app_id_buy <> 0
+				order by app_id_buy, created_at asc
+			`;
+			const ownedIds = ownedRows.map((row) => Number(row.app_id_buy));
+			const ownedGames = ownedRows.map((row) => ({
+				app_id_buy: Number(row.app_id_buy),
+				owned_since: iso(row.created_at),
+			}));
+
+			const gameIdsForCatalog = ownedIds.filter((id) => id > 0);
+			const catalogRows: CatalogRow[] =
+				gameIdsForCatalog.length > 0
+					? await sql<CatalogRow[]>`
+						select g.app_id, g.name, g.image,
+							case when coalesce(octet_length(a.lua_data), 0) > 0 or coalesce(octet_length(a.meta_data), 0) > 0 then a.game_id else null end as asset_game_id
+						from ${sql(TABLE_GAME)} g
+						left join ${sql(TABLE_ASSET)} a on a.game_id = g.app_id
+						where g.app_id in ${sql(gameIdsForCatalog)}
+						order by g.app_id
+					`
+					: [];
+			const catalogById = new Map(catalogRows.map((row) => [Number(row.app_id), row]));
+
+			const owned = ownedGames.map((row) => {
+				const appId = Number(row.app_id_buy);
+				const game = catalogById.get(appId);
+				return {
+					app_id_buy: appId,
+					game_id: game ? Number(game.app_id) : null,
+					game_name: game?.name ?? null,
+					game_image: game?.image ?? null,
+					has_asset: game?.asset_game_id != null,
+					owned_since: row.owned_since,
+				};
+			});
+
 			return json({
 				ok: true,
 				user: shapeUser(user),
 				list_game_kosong: true,
-				owned_games: [],
+				owned_games: owned,
 				purchase_history: [],
 			});
 		}
