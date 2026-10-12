@@ -20,6 +20,12 @@ try{
  await db.exec(patch);await db.exec(patch); // additive/idempotent on this fixture schema
  const multiPatch=await readFile(new URL('../supabase/FIXES_MULTIACCOUNT_PATCH.sql',import.meta.url),'utf8');
  await db.exec(multiPatch);await db.exec(multiPatch);
+ await db.query("insert into fixes_catalog(app_id,name)values(777,'Existing before Ryuu patch')");
+ const ryuuPatch=await readFile(new URL('../supabase/FIXES_RYUU_PATCH.sql',import.meta.url),'utf8');
+ await db.exec(ryuuPatch);await db.exec(ryuuPatch);
+ assert.equal((await db.query('select provider from fixes_catalog where app_id=777')).rows[0].provider,'luatools','existing games keep their provider');
+ await assert.rejects(db.query("update fixes_catalog set provider='invalid' where app_id=777"));
+ await db.exec('delete from fixes_catalog where app_id=777');
  const rls=await db.query("select relname,relrowsecurity from pg_class where relname like 'fixes_%' and relkind='r'");assert.equal(rls.rows.length,8);assert.ok(rls.rows.every(r=>r.relrowsecurity));
  const privileges=await db.query("select has_table_privilege('anon','fixes_provider_session','SELECT') as anon,has_table_privilege('authenticated','fixes_provider_session','SELECT') as authenticated");assert.deepEqual(privileges.rows[0],{anon:false,authenticated:false});
  await db.query("insert into fixes_catalog(app_id,name)values($1,$2)",[620,"Fixture"]);
@@ -114,5 +120,17 @@ try{
  await assert.rejects(template(bulk,{payload:JSON.stringify([{app_id:0,name:'Invalid',header_image:null,tags:[],fix_count:1}])}));
  await db.exec('ROLLBACK');
  assert.deepEqual((await db.query('select app_id::text,name,active from fixes_catalog order by app_id')).rows,beforeRollback.rows,'failed batch rolls back all catalog changes');
- console.log("PASS: SQL patch rerun, private RLS tables, job deduplication, lease expiry, stale-owner rejection and ready publication; multiaccount 24/day, relogin quota preservation, rollover and account eligibility; automatic host audit deduplication; catalog empty/populated array filters (temporary PostgreSQL only).");
+ const invalidateSource=providerQueries.find(q=>q.includes("coalesce(e.snapshot->>'provider','luatools')<>c.provider"));assert.ok(invalidateSource);
+ await db.exec('update fixes_catalog set details_synced_at=now() where app_id=620');
+ await template(bulk,{payload:JSON.stringify([{app_id:620,name:'Ryuu fixture',tags:[],fix_count:1,provider:'ryuu'}])});
+ const changedSource=(await db.query('select provider,details_synced_at from fixes_catalog where app_id=620')).rows[0];
+ assert.equal(changedSource.provider,'ryuu');assert.equal(changedSource.details_synced_at,null,'provider switch clears detail freshness');
+ await template(invalidateSource,{});
+ assert.equal((await db.query("select active from fixes_entries where fix_id='fixture'")).rows[0].active,false,'old provider entries cannot be downloaded');
+ await db.query("insert into fixes_entries(fix_id,app_id,revision,snapshot)values($1,620,$2,$3)",['ryuu:620:fixture',revision,{provider:'ryuu'}]);
+ await db.exec('update fixes_catalog set details_synced_at=now() where app_id=620');
+ await template(bulk,{payload:JSON.stringify([{app_id:620,name:'Primary restored',tags:[],fix_count:1,provider:'luatools'}])});
+ await template(invalidateSource,{});
+ assert.equal((await db.query("select active from fixes_entries where fix_id='ryuu:620:fixture'")).rows[0].active,false,'primary return deactivates fallback entries');
+ console.log("PASS: SQL patch rerun, private RLS tables, job deduplication, lease expiry, stale-owner rejection and ready publication; multiaccount 24/day, relogin quota preservation, rollover and account eligibility; automatic host audit deduplication; catalog array filters; Ryuu migration compatibility and source-switch invalidation (temporary PostgreSQL only).");
 }finally{await db.close();}

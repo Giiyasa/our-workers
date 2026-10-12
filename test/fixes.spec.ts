@@ -12,6 +12,11 @@ vi.mock('../src/lib/session-guard', async (importOriginal) => {
     return { ...original, requireSession: vi.fn(async () => ({ ok: true, session: { userId: '12' } })) };
 });
 afterEach(() => vi.unstubAllGlobals());
+function catalogFetch(games: unknown[]) {
+    return vi.fn(async (raw: string) => new URL(String(raw)).hostname === 'generator.ryuu.lol'
+        ? Response.json([{ appid: '999999', name: 'Unsupported archive', fixes: [{ filename: 'unsupported.7z', href: 'https://generator.ryuu.lol/fixes/unsupported.7z', badges: [] }] }])
+        : Response.json({ games }));
+}
 const key = '11'.repeat(32), revision = 'a'.repeat(64), token = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 function sqlMock(handler: (query: string, values: unknown[]) => unknown) {
     const fn = ((parts: TemplateStringsArray, ...values: unknown[]) => typeof parts === 'string' ? parts : Promise.resolve(handler(parts.join(' ').replace(/\s+/g, ' '), values))) as unknown as Sql;
@@ -408,13 +413,13 @@ describe('Fixes catalog array binding',()=>{
 describe('catalog bulk sync',()=>{
  it('syncs hundreds of games using bounded batches instead of per-game writes',async()=>{
   const games=Array.from({length:500},(_,i)=>({appid:String(i+1),name:`Game ${i+1}`,tags:[],fixCount:1}));
-  vi.stubGlobal('fetch',vi.fn().mockResolvedValue(Response.json({games})));
+  vi.stubGlobal('fetch',catalogFetch(games));
   const calls:{query:string;values:unknown[]}[]=[];
   const count=await syncListings(sqlMock((query,values)=>{calls.push({query,values});return [];}));
   expect(count).toBe(500);expect(calls.length).toBeGreaterThan(3);expect(calls.length).toBeLessThan(12);
   expect(calls[0].query).toContain('pg_advisory_xact_lock');
   expect(calls[1].query).toContain('set active=false');
-  const batches=calls.slice(2);
+  const batches=calls.filter(c=>c.query.includes('jsonb_to_recordset'));
   expect(batches.every(c=>c.query.includes('jsonb_to_recordset')&&c.query.includes('::text::jsonb')&&new TextEncoder().encode(c.values[0] as string).byteLength<=16*1024)).toBe(true);
   expect(batches.flatMap(c=>JSON.parse(c.values[0] as string))).toHaveLength(500);
  });
@@ -437,7 +442,7 @@ describe('admin sync failure diagnostics',()=>{
   expect(JSON.stringify(data)).not.toContain('secret-upstream-body');
  });
  it('reports SQLSTATE without including database error details',async()=>{
-  vi.stubGlobal('fetch',vi.fn().mockResolvedValue(Response.json({games:[{appid:'620',name:'Fixture',tags:[],fixCount:1}]})));
+  vi.stubGlobal('fetch',catalogFetch([{appid:'620',name:'Fixture',tags:[],fixCount:1}]));
   const error=Object.assign(new Error('postgres://secret-user:secret-password@db/secret'),{code:'42P01'});
   const response=await fixesAdminSyncRoute.handle(context('/api/admin/fixes/sync'),null,sqlMock(()=>{throw error;}));
   expect(response.status).toBe(503);const data=await response.json() as any;
@@ -448,7 +453,7 @@ describe('admin sync failure diagnostics',()=>{
 
 describe('sync runtime error classification',()=>{
  it('preserves Postgres transport error codes and sync stage',async()=>{
-  vi.stubGlobal('fetch',vi.fn().mockResolvedValue(Response.json({games:[{appid:'620',name:'Fixture',tags:[],fixCount:1}]})));
+  vi.stubGlobal('fetch',catalogFetch([{appid:'620',name:'Fixture',tags:[],fixCount:1}]));
   const error=Object.assign(new Error('sensitive-connection-string'),{code:'CONNECTION_CLOSED'});
   const response=await fixesAdminSyncRoute.handle(context('/api/admin/fixes/sync'),null,sqlMock(()=>{throw error;}));
   const data=await response.json() as any;expect(data.code).toBe('SYNC_DB_FAILED');expect(data.db_code).toBe('CONNECTION_CLOSED');expect(data.stage).toBe('lock_catalog');expect(JSON.stringify(data)).not.toContain('sensitive');
@@ -463,10 +468,10 @@ describe('sync runtime error classification',()=>{
 
 it('sizes catalog batches by UTF-8 bytes and rejects oversized rows before DB changes',async()=>{
  const games=Array.from({length:40},(_,i)=>({appid:String(i+1),name:'\u65e5'.repeat(300),tags:[],fixCount:1}));
- const values:unknown[]=[];vi.stubGlobal('fetch',vi.fn().mockResolvedValue(Response.json({games})));
+ const values:unknown[]=[];vi.stubGlobal('fetch',catalogFetch(games));
  await syncListings(sqlMock((q,v)=>{if(q.includes('jsonb_to_recordset'))values.push(v[0]);return [];}));
  expect(values.length).toBeGreaterThan(1);expect(values.every(v=>new TextEncoder().encode(v as string).byteLength<=16*1024)).toBe(true);
- let writes=0;vi.stubGlobal('fetch',vi.fn().mockResolvedValue(Response.json({games:[{...games[0],name:'x'.repeat(17000)}]})));
+ let writes=0;vi.stubGlobal('fetch',catalogFetch([{...games[0],name:'x'.repeat(17000)}]));
  await expect(syncListings(sqlMock(()=>{writes++;return [];}))).rejects.toMatchObject({code:'CATALOG_ROW_TOO_LARGE'});expect(writes).toBe(0);
 });
 

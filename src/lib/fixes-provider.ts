@@ -3,6 +3,7 @@ import { isIP } from 'node:net';
 import { FIXES_CONFIG } from '../fixes-config.mjs';
 import type { Sql } from './db';
 import { encryptAsset, decryptAsset } from './asset-crypto';
+import { fetchRyuuCatalog, ryuuFixUrl } from './ryuu-fixes';
 export type Slot = 'manifest' | 'fix';
 export interface FixTag {
     id: string;
@@ -20,6 +21,8 @@ export interface FixEntry {
     manifestFilename?: string | null;
     fixFilename?: string | null;
     createdAt?: string | null;
+    provider?: 'luatools' | 'ryuu';
+    sourceUrl?: string;
 }
 export interface FixGame {
     appid: string;
@@ -27,6 +30,7 @@ export interface FixGame {
     header_image?: string | null;
     fixCount: number;
     tags: FixTag[];
+    provider?: 'luatools' | 'ryuu';
 }
 export class FixesFailure extends Error {
     constructor(public code: string, public upstreamStatus?: number) {
@@ -35,12 +39,14 @@ export class FixesFailure extends Error {
 }
 const API = FIXES_CONFIG.api;
 const AUTH = FIXES_CONFIG.auth;
+const RYUU = FIXES_CONFIG.ryuu;
 export const digest = (value: string | Uint8Array) => createHash('sha256').update(value).digest('hex');
 export function safeFilename(value: unknown, slot: Slot): string {
     if (typeof value !== 'string' || value.length > 180 || /[\\/\x00-\x1f\x7f:"<>|?*]/.test(value) || !value.trim())
         throw new FixesFailure('INVALID_FILENAME');
     const name = value.trim();
-    if (!/\.(zip|lua|manifest)$/i.test(name) || (slot === 'fix' && !/\.zip$/i.test(name)))
+    if (!/\.(zip|rar|lua|manifest)$/i.test(name) || (slot === 'fix' && !/\.(zip|rar)$/i.test(name)) ||
+        (slot === 'manifest' && /\.rar$/i.test(name)))
         throw new FixesFailure('INVALID_FILENAME');
     return name;
 }
@@ -85,7 +91,7 @@ export function validateFix(value: unknown): FixEntry {
         createdAt: f.createdAt ?? null,
     };
 }
-async function jsonFetch(url: string, headers?: Record<string, string>): Promise<unknown> {
+export async function jsonFetch(url: string, headers?: Record<string, string>): Promise<unknown> {
     let res: Response;
     try {
         res = await fetch(url, { headers, redirect: 'manual', signal: AbortSignal.timeout(20000) });
@@ -141,23 +147,32 @@ export async function syncListings(sql: Sql, onStage: (stage: string) => void = 
     onStage("validate_catalog");
     if (!Array.isArray(data?.games) || !data.games.length || data.games.length > 20000)
         throw new FixesFailure('CATALOG_FORMAT');
-    const games = data.games.map((g) => {
+    const games: FixGame[] = data.games.map((g) => {
         if (!g || typeof g !== 'object' || !/^\d+$/.test(String(g.appid)) ||
             !Number.isSafeInteger(Number(g.appid)) ||
             Number(g.appid) <= 0 ||
             typeof g.name !== 'string' ||
             !Array.isArray(g.tags))
             throw new FixesFailure('CATALOG_FORMAT');
-        return { ...g, tags: validateTags(g.tags) };
+        return { ...g, tags: validateTags(g.tags), provider: 'luatools' as const };
     });
     if (new Set(games.map(g => String(Number(g.appid)))).size !== games.length)
         throw new FixesFailure('CATALOG_FORMAT');
+    onStage('fetch_ryuu_catalog');
+    const primaryIds = new Set(games.map(g => String(Number(g.appid))));
+    // A primary outage is not an empty catalog. Both snapshots must validate before any writes.
+    for (const game of await fetchRyuuCatalog()) {
+        if (!primaryIds.has(game.appid)) {
+            const { fixes: _, ...listing } = game;
+            games.push(listing);
+        }
+    }
     // Bound each Postgres parameter instead of sending the entire snapshot in one socket write.
     const batches: string[] = [];
     let entries: string[] = [], bytes = 2;
     for (const g of games) {
         const entry = JSON.stringify({app_id:Number(g.appid),name:g.name,header_image:g.header_image ?? null,
-            tags:g.tags,fix_count:Number(g.fixCount) || 0});
+            tags:g.tags,fix_count:Number(g.fixCount) || 0,provider:g.provider});
         const size = new TextEncoder().encode(entry).byteLength;
         if (size + 2 > 16 * 1024) throw new FixesFailure('CATALOG_ROW_TOO_LARGE');
         if (entries.length && bytes + size + 1 > 16 * 1024) {
@@ -180,30 +195,45 @@ export async function syncListings(sql: Sql, onStage: (stage: string) => void = 
             onStage(`write_catalog_batch_${index+1}_of_${batches.length}`);
             await tx`with incoming as (
  select * from jsonb_to_recordset(${payload}::text::jsonb)
- as g(app_id bigint,name text,header_image text,tags jsonb,fix_count integer)
+ as g(app_id bigint,name text,header_image text,tags jsonb,fix_count integer,provider text)
 ), saved as (
- insert into fixes_catalog(app_id,name,header_image,tags,fix_count,active)
- select app_id,name,header_image,tags,fix_count,true from incoming order by app_id
+ insert into fixes_catalog(app_id,name,header_image,tags,fix_count,active,provider)
+ select app_id,name,header_image,tags,fix_count,true,coalesce(provider,'luatools') from incoming order by app_id
  on conflict(app_id) do update set name=excluded.name,header_image=excluded.header_image,
- tags=excluded.tags,fix_count=excluded.fix_count,active=true,synced_at=now()
+ tags=excluded.tags,fix_count=excluded.fix_count,active=true,synced_at=now(),provider=excluded.provider,
+ details_synced_at=case when fixes_catalog.provider=excluded.provider then fixes_catalog.details_synced_at else null end
  returning app_id
 )
  select count(*)::int as count from saved`;
         }
+        // A source switch invalidates old entries even before the next detail request.
+        await tx`update fixes_entries e set active=false from fixes_catalog c where e.app_id=c.app_id
+ and e.active=true and coalesce(e.snapshot->>'provider','luatools')<>c.provider`;
         onStage("commit_catalog");
     });
     return games.length;
 }
 export async function syncDetails(sql: Sql, appId: number): Promise<void> {
-    const data = (await jsonFetch(`${API}/api/denuvo/fixes?appid=${appId}`)) as {
-        appid?: string;
-        fixes?: unknown[];
-    };
-    if (String(data?.appid) !== String(appId) || !Array.isArray(data.fixes) || data.fixes.length > 1000)
-        throw new FixesFailure('CATALOG_FORMAT');
-    const fixes = data.fixes.map(validateFix);
+    const catalog = await sql`select provider from fixes_catalog where app_id=${appId}::bigint and active=true`;
+    if (!catalog[0]) throw new FixesFailure('CATALOG_CHANGED');
+    const provider = catalog[0].provider ?? 'luatools';
+    let fixes: FixEntry[];
+    if (provider === 'ryuu') {
+        const game = (await fetchRyuuCatalog()).find(game => game.appid === String(appId));
+        // A removed game has no active packages; never retain old downloadable entries.
+        fixes = game?.fixes ?? [];
+    } else {
+        const data = (await jsonFetch(`${API}/api/denuvo/fixes?appid=${appId}`)) as {
+            appid?: string;
+            fixes?: unknown[];
+        };
+        if (String(data?.appid) !== String(appId) || !Array.isArray(data.fixes) || data.fixes.length > 1000)
+            throw new FixesFailure('CATALOG_FORMAT');
+        fixes = data.fixes.map(validateFix);
+    }
     await sql.begin(async (tx) => {
-        await tx `select app_id from fixes_catalog where app_id=${appId}::bigint for update`;
+        const locked = await tx `select app_id,provider,active from fixes_catalog where app_id=${appId}::bigint for update`;
+        if (!locked[0]?.active || locked[0].provider !== provider) throw new FixesFailure('CATALOG_CHANGED');
         await tx `update fixes_entries set active=false where app_id=${appId}::bigint`;
         for (const f of fixes) {
             const revision = digest(JSON.stringify(f));
@@ -410,6 +440,21 @@ async function verifiedDownloadUrl(raw: unknown, sql: Sql): Promise<URL> {
 async function requestPackageLink(sql: Sql, env: Env, fixId: string, slot: Slot): Promise<{
     url?: string;
 }> {
+    if (fixId.startsWith('ryuu:')) {
+        if (slot !== 'fix') throw new FixesFailure('RYUU_SLOT');
+        if (!env.RYUU_AUTH_CODE?.trim()) throw new FixesFailure('RYUU_AUTH_CONFIG');
+        const rows = await sql`select e.app_id,e.snapshot from fixes_entries e join fixes_catalog c on c.app_id=e.app_id
+ where e.fix_id=${fixId} and e.active=true and c.active=true and c.provider='ryuu'`;
+        const entry = rows[0]?.snapshot as FixEntry | undefined;
+        if (!entry || entry.provider !== 'ryuu' || !entry.hasFix || entry.id !== fixId)
+            throw new FixesFailure('RYUU_ENTRY');
+        const url = ryuuFixUrl(entry.sourceUrl);
+        if (fixId !== `ryuu:${rows[0].app_id}:${digest(url.pathname)}` ||
+            decodeURIComponent(url.pathname).slice('/fixes/'.length) !== safeFilename(entry.fixFilename, 'fix'))
+            throw new FixesFailure('RYUU_ENTRY');
+        url.searchParams.set('auth_code', env.RYUU_AUTH_CODE);
+        return { url: url.toString() };
+    }
     const credential = await providerAccessToken(sql, env);
     let data: {
         url?: string;
@@ -447,7 +492,11 @@ export async function fetchFixPackage(sql: Sql, env: Env, fixId: string, slot: S
             await res.body?.cancel();
             if (!location)
                 throw new FixesFailure('DOWNLOAD_REDIRECT');
-            url = await verifiedDownloadUrl(new URL(location, url).toString(), sql);
+            const next = new URL(location, url);
+            // A query credential must never be sent to another origin.
+            if (fixId.startsWith('ryuu:') && next.origin !== RYUU)
+                throw new FixesFailure('RYUU_DOWNLOAD_REDIRECT');
+            url = await verifiedDownloadUrl(next.toString(), sql);
             continue;
         }
         if (!res.ok || !res.body) {

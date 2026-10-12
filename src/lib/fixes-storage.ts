@@ -44,6 +44,14 @@ export function validatePackagePrefix(bytes: Uint8Array, filename: string): void
 		if (!zip) throw new FixesFailure('PACKAGE_FORMAT');
 		return;
 	}
+	if (/\.rar$/i.test(filename)) {
+		// RAR 4.x and RAR 5.x have distinct full signatures.
+		const common = bytes.length >= 7 && bytes[0] === 0x52 && bytes[1] === 0x61 && bytes[2] === 0x72 &&
+			bytes[3] === 0x21 && bytes[4] === 0x1a && bytes[5] === 0x07;
+		if (!common || !(bytes[6] === 0 || (bytes.length >= 8 && bytes[6] === 1 && bytes[7] === 0)))
+			throw new FixesFailure('PACKAGE_FORMAT');
+		return;
+	}
 	if (/\.lua$/i.test(filename)) {
 		const text = new TextDecoder().decode(bytes);
 		if (/^\s*[<{]/.test(text) || !/\baddappid\s*\(\s*\d+/.test(text)) throw new FixesFailure('PACKAGE_FORMAT');

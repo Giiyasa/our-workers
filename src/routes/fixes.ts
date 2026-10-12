@@ -105,7 +105,10 @@ export const fixesDetailRoute: DbRoute<number> = {
             ok: true,
             appid: String(appId),
             name: games[0].name,
-            fixes: entries.map((r) => ({ ...r.snapshot, revision: r.revision })),
+            fixes: entries.map((r) => {
+                const { sourceUrl: _, ...snapshot } = r.snapshot;
+                return { ...snapshot, revision: r.revision };
+            }),
         });
     },
 };

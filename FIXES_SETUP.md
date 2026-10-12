@@ -19,6 +19,37 @@ Revisi adalah hash snapshot metadata yang tersedia, bukan klaim bahwa upstream m
 
 ## Database
 
+### Fallback katalog Ryuu
+
+Katalog Fixes menggabungkan listing LuaTools dengan `https://generator.ryuu.lol/files/fixes.json` berdasarkan AppID numerik. Jika AppID ada pada kedua sumber, listing/detail/unduhan tetap memakai LuaTools. Ryuu menambahkan game yang AppID-nya belum ada di listing LuaTools. Respons error LuaTools tidak dianggap sebagai katalog kosong. Kedua katalog divalidasi sebelum transaksi; kegagalan salah satu sumber mempertahankan snapshot DB sebelumnya.
+
+Untuk instalasi Fixes existing, jalankan **hanya tambahan** `supabase/FIXES_RYUU_PATCH.sql` sebelum menjalankan Worker baru. Patch menambahkan kolom provider tanpa membuat ulang tabel. Saat sumber suatu game berubah, detail freshness dibersihkan dan entri sumber lama dinonaktifkan agar paket cache lama tidak ditawarkan.
+
+Download Ryuu memakai secret **`RYUU_AUTH_CODE` existing**, disisipkan ke query `auth_code` hanya saat Worker mengambil file dari `generator.ryuu.lol`. Secret tidak disimpan dalam snapshot, tidak dikirim ke desktop/DNS, dan redirect lintas origin ditolak. Tidak perlu login provider LuaTools untuk paket Ryuu. Pool dan kuota akun LuaTools hanya dipakai untuk sumber LuaTools; batas unduhan user dan cache R2 tetap berlaku untuk semua sumber. Batas upstream Ryuu belum diverifikasi; respons penolakan provider tetap menghentikan unduhan.
+
+Ryuu menyediakan paket Fix ZIP dan RAR, tanpa slot Manifest. Worker memeriksa signature ZIP, RAR4, atau RAR5 sebelum mengisi cache R2; ekstensi saja tidak cukup. Desktop di `G:\STEAM_PROJECT\my-apps-testing` mengekstrak RAR menggunakan decoder UnRAR yang dibundel, tanpa membutuhkan WinRAR/7-Zip pada komputer user. ZIP tetap memakai jalur existing. Metadata ukuran ikut menentukan revisi snapshot. Nama game kosong diberi label `Game <AppID>`.
+
+Perbarui EXE desktop bersama Worker agar paket RAR dapat dipasang. Ekstraksi RAR dibatasi 4 GiB total, 50.000 entri, dictionary 256 MiB, dan mendukung pembatalan serta verifikasi checksum. Entri link, path keluar folder, nama tujuan duplikat, arsip berpassword, dan arsip multi-volume ditolak. Backup dan revert memakai jurnal instalasi yang sama dengan ZIP.
+
+```powershell
+Set-Location G:\STEAM_PROJECT\my-apps-testing
+corepack pnpm install --frozen-lockfile
+cargo test --manifest-path src-tauri/Cargo.toml --lib fixes:: -- --test-threads=1
+corepack pnpm app:portable
+```
+
+Urutan aktivasi setelah menerapkan patch SQL:
+
+```powershell
+Set-Location G:\STEAM_PROJECT\our-workers
+# Hanya jika secret Ryuu existing belum terpasang; input diminta oleh Wrangler.
+corepack pnpm exec wrangler secret put RYUU_AUTH_CODE
+corepack pnpm deploy
+node scripts/fixes-admin.mjs sync
+```
+
+Ini mengubah katalog **Fixes**. Urutan sumber file Lua untuk claim game berada di `src/lib/asset-providers.ts` dan tidak berubah oleh integrasi ini. Arsip dari fixes.json tidak dipakai sebagai file Lua.
+
 Untuk setup baru, terapkan `supabase/FIXES_PATCH.sql` lalu `supabase/FIXES_MULTIACCOUNT_PATCH.sql`. Jika patch awal sudah diterapkan, jalankan **hanya** patch multiaccount melalui workflow migrasi yang biasa digunakan. Patch ini belum dijalankan ke database produksi. Jangan menjalankan ulang patch claim/base schema.
 
 Tabel tambahan: `fixes_catalog`, `fixes_entries`, `fixes_package_jobs`, `fixes_provider_session`, `fixes_download_usage`. Semuanya private (RLS aktif; hak anon/authenticated/PUBLIC dicabut). Role server pada DIRECT_URL perlu hak tabel yang sesuai; koneksi client tidak diberi akses langsung.
