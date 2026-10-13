@@ -24,8 +24,8 @@ function fakeSql(count: number | 'failed' | 'pending', rowCount: number) {
   }) as unknown as Sql;
 }
 
-async function list(count: number | 'failed' | 'pending', rowCount: number, page = 2, search = '') {
-  const url = new URL(`https://fixture.test/api/games?page=${page}&page_size=24&search=${search}`);
+async function list(count: number | 'failed' | 'pending', rowCount: number, page = 2, search = '', countOnly = false) {
+  const url = new URL(`https://fixture.test/api/games?page=${page}&page_size=24&search=${search}&count_only=${countOnly}`);
   const context = { url, request: new Request(url) } as RouteContext;
   const prepared = await gamesListRoute.prepare!(context);
   if (prepared instanceof Response) throw new Error('Unexpected validation failure');
@@ -33,6 +33,17 @@ async function list(count: number | 'failed' | 'pending', rowCount: number, page
 }
 
 describe('catalog pagination metadata', () => {
+  it('returns the full count independently of the requested page', async () => {
+    expect(await list(183500, 0, 2, '', true)).toMatchObject({ total: 183500, total_pages: 7646, total_approximate: false, page_size: 24 });
+  });
+
+  it('counts all search matches without a page cap', async () => {
+    expect(await list(60, 0, 2, 'witcher', true)).toMatchObject({ total: 60, total_pages: 3, total_approximate: false });
+  });
+
+  it('does not claim an exact total when the count query fails', async () => {
+    await expect(list('failed', 0, 1, '', true)).rejects.toThrow('Count unavailable');
+  });
   it('marks capped search counts approximate and preserves the next page', async () => {
     const body = await list(48, 25, 2, 'witcher');
     expect(body).toMatchObject({ page: 2, count: 24, total: 49, total_pages: 3, total_approximate: true, has_more: true });

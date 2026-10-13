@@ -49,6 +49,7 @@ import type { DbRoute } from '../lib/types';
 interface ListInput {
 	page: number;
 	pageSize: number;
+	countOnly: boolean;
 	search: string;
 	genres: string[];
 	categories: string[];
@@ -72,6 +73,7 @@ export const gamesListRoute: DbRoute<ListInput> = {
 			input: {
 				page: readInt(params.get('page'), 1, 1, MAX_PAGE),
 				pageSize: readInt(params.get('page_size'), DEFAULT_PAGE_SIZE, 1, MAX_PAGE_SIZE),
+				countOnly: params.get('count_only') === 'true',
 				search: (params.get('search') ?? '').trim().slice(0, MAX_SEARCH_LENGTH),
 				genres,
 				categories,
@@ -80,7 +82,7 @@ export const gamesListRoute: DbRoute<ListInput> = {
 		};
 	},
 	handle: async ({}, input, sql) => {
-		const { page, pageSize, search, genres, categories, tagWarning } = input;
+		const { page, pageSize, countOnly, search, genres, categories, tagWarning } = input;
 
 		const conditions = [];
 
@@ -167,6 +169,16 @@ export const gamesListRoute: DbRoute<ListInput> = {
 		}
 
 		const where = conditions.length > 0 ? sql`where ${conditions.reduce((a, b) => sql`${a} and ${b}`)}` : sql``;
+
+		// Count once per filter independently of page fetching. No sort/window
+		// or page cap: the desktop can load cards first, then the exact total.
+		if (countOnly) {
+			const result = await sql`select count(*)::int as total from ${sql(TABLE_GAME)} g ${where}`;
+			const total = Number(result[0]?.total);
+			if (!Number.isSafeInteger(total) || total < 0) throw new Error('Catalog count unavailable');
+			return json({ ok: true, total, total_approximate: false, page_size: pageSize,
+				total_pages: Math.max(1, Math.ceil(total / pageSize)) });
+		}
 
 		// Objek peringkat pencarian: non-null hanya saat pencarian aktif di
 		// jalur ternormalisasi. Dipakai WHERE (di atas), ORDER BY, dan
