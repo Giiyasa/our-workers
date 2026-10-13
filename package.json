@@ -8,6 +8,7 @@
 		"dev:remote": "wrangler dev --remote",
 		"start": "wrangler dev",
 		"test": "vitest",
+		"test:catalog-db": "vitest run --config vitest.catalog-db.config.mts",
 		"typecheck": "tsc --noEmit",
 		"cf-typegen": "wrangler types",
 		"test:fixes-db": "node scripts/verify-fixes-db.mjs",

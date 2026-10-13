@@ -18,6 +18,7 @@ import { defineConfig } from "vitest/config";
 // ---------------------------------------------------------------------------
 
 export default defineConfig({
+	test: { exclude: ["**/node_modules/**", "test/games-list-duplicates.spec.ts"] },
 	plugins: [
 		cloudflareTest({
 			wrangler: { configPath: "./wrangler.jsonc" },

@@ -38,7 +38,7 @@
  * `filters.tag_warning` (lihat prepare), bukan diabaikan diam-diam.
  */
 
-import { COUNT_BUDGET_MS, DEFAULT_PAGE_SIZE, MAX_FILTER_LENGTH, MAX_FILTER_VALUES, MAX_PAGE, MAX_PAGE_SIZE, MAX_SEARCH_LENGTH, SEARCH_USE_NORMALIZED_KEY, TABLE_GAME, WORD_SIMILARITY_MIN } from '../config';
+import { COUNT_BUDGET_MS, DEFAULT_PAGE_SIZE, MAX_FILTER_LENGTH, MAX_FILTER_VALUES, MAX_PAGE, MAX_PAGE_SIZE, MAX_SEARCH_LENGTH, SEARCH_USE_NORMALIZED_KEY, TABLE_ASSET, TABLE_GAME, WORD_SIMILARITY_MIN } from '../config';
 import { json } from '../lib/http';
 import { hasLevenshtein } from '../lib/fuzzy';
 import { escapeLike, readInt, readList } from '../lib/params';
@@ -170,10 +170,39 @@ export const gamesListRoute: DbRoute<ListInput> = {
 
 		const where = conditions.length > 0 ? sql`where ${conditions.reduce((a, b) => sql`${a} and ${b}`)}` : sql``;
 
+		// Steam redirects these older AppIDs to the newer product pages. Keep
+		// both database rows: assets and purchases still refer to their AppID.
+		// Only collapse these verified pairs in the catalog response. Never
+		// collapse arbitrary titles with the same name (different editions exist).
+		const duplicateIds = [1962660, 3595230, 2519060, 3595270];
+		const canonicalId = sql`case g.app_id
+			when 1962660 then 3595230
+			when 2519060 then 3595270
+			else g.app_id end`;
+		const pairWhere = conditions.length > 0
+			? sql`${where} and g.app_id in ${sql(duplicateIds)}`
+			: sql`where g.app_id in ${sql(duplicateIds)}`;
+		// A row with actual downloadable assets wins. Otherwise use Steam's
+		// current AppID. This leaves the card pointing to a usable AppID.
+		const winner = sql`select app_id from (
+			select g.app_id, row_number() over (
+				partition by ${canonicalId}
+				order by case when exists (
+					select 1 from ${sql(TABLE_ASSET)} a
+					where a.game_id = g.app_id and
+						(coalesce(octet_length(a.lua_data), 0) > 0 or coalesce(octet_length(a.meta_data), 0) > 0)
+				) then 0 else 1 end,
+				case when g.app_id in (3595230, 3595270) then 0 else 1 end, g.id
+			) as duplicate_rank
+			from ${sql(TABLE_GAME)} g ${pairWhere}
+		) pair_rows where duplicate_rank = 1`;
+		const visible = sql`(g.app_id not in ${sql(duplicateIds)} or g.app_id in (${winner}))`;
+		const visibleWhere = conditions.length > 0 ? sql`${where} and ${visible}` : sql`where ${visible}`;
+
 		// Count once per filter independently of page fetching. No sort/window
 		// or page cap: the desktop can load cards first, then the exact total.
 		if (countOnly) {
-			const result = await sql`select count(*)::int as total from ${sql(TABLE_GAME)} g ${where}`;
+			const result = await sql`select count(*)::int as total from ${sql(TABLE_GAME)} g ${visibleWhere}`;
 			const total = Number(result[0]?.total);
 			if (!Number.isSafeInteger(total) || total < 0) throw new Error('Catalog count unavailable');
 			return json({ ok: true, total, total_approximate: false, page_size: pageSize,
@@ -230,7 +259,7 @@ export const gamesListRoute: DbRoute<ListInput> = {
 					from (
 						select row_number() over (order by ${orderFrag}) as rn
 						from ${sql(TABLE_GAME)} g
-						${where}
+						${visibleWhere}
 					) w
 					where w.rn <= ${offset + pageSize}
 				`
@@ -239,7 +268,7 @@ export const gamesListRoute: DbRoute<ListInput> = {
 			: sql`
 					select count(*)::int as total
 					from ${sql(TABLE_GAME)} g
-					${where}
+					${visibleWhere}
 				`
 				.then((r) => Number(r[0]?.total ?? 0))
 				.catch(() => null);
@@ -264,7 +293,7 @@ export const gamesListRoute: DbRoute<ListInput> = {
 				g.created_at,
 				g.updated_at
 			from ${sql(TABLE_GAME)} g
-			${where}
+			${visibleWhere}
 			order by ${orderFrag}
 			limit ${pageSize + 1} offset ${offset}
 		`;
