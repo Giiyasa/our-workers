@@ -66,7 +66,9 @@ export const fixesListRoute: DbRoute = {
             games: rows.map(({ total, ...g }) => g),
             tags: tags.map((r) => r.tag),
             page: Math.floor(page),
+            pageSize: limit,
             total: rows[0]?.total ?? 0,
+            totalPages: Math.max(1, Math.ceil((rows[0]?.total ?? 0) / limit)),
             hasMore: Math.floor(page) * limit < (rows[0]?.total ?? 0),
         });
     },

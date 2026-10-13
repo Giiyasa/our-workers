@@ -265,10 +265,14 @@ export const gamesListRoute: DbRoute<ListInput> = {
 			countPromise,
 			new Promise<null>((resolve) => setTimeout(() => resolve(null), COUNT_BUDGET_MS)),
 		]);
-		const totalApproximate = totalSettled === null;
-		const total = totalApproximate ? offset + pageSize : totalSettled;
 		const hasMore = rows.length > pageSize;
 		const pageRows = hasMore ? rows.slice(0, pageSize) : rows;
+		// A capped search count cannot be the exact total while lookahead
+		// proves another row exists. Preserve fast counts, but label them honestly.
+		const minimumTotal = pageRows.length > 0 ? offset + pageRows.length + (hasMore ? 1 : 0) : 0;
+		const totalApproximate = totalSettled === null || !Number.isSafeInteger(totalSettled) ||
+			totalSettled < minimumTotal || (searchRank !== null && hasMore);
+		const total = totalApproximate ? minimumTotal : totalSettled;
 		const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
 		return json({
@@ -279,7 +283,7 @@ export const gamesListRoute: DbRoute<ListInput> = {
 			total,
 			total_approximate: totalApproximate,
 			total_pages: totalPages,
-			has_more: hasMore && (totalApproximate || page < totalPages),
+			has_more: hasMore,
 			search: search || null,
 			filters: {
 				genre: genres,
