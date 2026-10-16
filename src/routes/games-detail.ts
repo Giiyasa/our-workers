@@ -43,7 +43,8 @@
 
 import { STEAM_MAX_APP_ID, TABLE_GAME } from "../config";
 import { fail, json } from "../lib/http";
-import { fetchSteamDetail } from "../lib/steam";
+import { fetchSteamDetail, shapeSteamDetail } from "../lib/steam";
+import { fetchLuaToolsSteamDetail } from "../lib/luatools-steam";
 import type { DbRoute } from "../lib/types";
 
 interface Input {
@@ -78,6 +79,17 @@ export const gamesDetailRoute: DbRoute<Input> = {
 			response.headers.set("cache-control", "no-store");
 			return response;
 		}
+
+        // The LuaTools proxy provides basic metadata when Steam is inaccessible.
+        const metadata = await fetchLuaToolsSteamDetail(gameId);
+        if (metadata) {
+            const response = json({ ok: true, metadata_source: 'luatools', detail_partial: true,
+                data: { ...shapeSteamDetail({ name: metadata.name }),
+                    genres: metadata.genres.map(description => ({ id: null, description })),
+                    is_unavailable_game: games[0]?.is_unavailable_game === true } });
+            response.headers.set('cache-control', 'no-store');
+            return response;
+        }
 
 		// Dua kegagalan dibedakan supaya pesannya jujur: appid tidak ada (404)
 		// vs Steam yang tidak menjawab (502). Client bisa menampilkan pesan yang

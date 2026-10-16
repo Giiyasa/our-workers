@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { searchSteamGames, saveSteamSearchGames } from '../src/lib/steam-search';
 import { gamesListRoute } from '../src/routes/games-list';
+import { gamesDetailRoute } from '../src/routes/games-detail';
 import type { Sql } from '../src/lib/db';
 import type { RouteContext } from '../src/lib/types';
 
@@ -13,7 +14,9 @@ afterEach(() => { vi.unstubAllGlobals(); vi.resetAllMocks(); });
 function steam(items: unknown[], status = 200) {
     const fetcher = vi.fn(async (raw: string | URL) => {
         const url = new URL(raw);
+        if (url.pathname.includes('/steam/search')) return Response.json({ results: items.map((item: any)=>({...item,appid:item.id,icon:item.tiny_image})) }, { status });
         if (url.pathname.includes('storesearch')) return Response.json({ items }, { status });
+        if (url.pathname.includes('/steam/details')) return new Response(null,{status:503});
         const id = url.searchParams.get('appids')!;
         return Response.json({ [id]: { success: true, data: { name: 'Steam Game', short_description: 'Official description',
             genres: [{ id: 1, description: 'Action' }], categories: [{ id: 2, description: 'Single-player' }] } } });
@@ -29,8 +32,10 @@ describe('Steam search fallback', () => {
         expect(result).toHaveLength(8);
         expect(result[0]).toMatchObject({ app_id: 1, genre: ['Action'], categories: ['Single-player'], description: 'Official description' });
         const url = new URL(fetcher.mock.calls[0][0]);
-        expect(url.searchParams.get('term')).toBe('missing & game');
-        expect(url.searchParams.get('l')).toBe('english');expect(url.searchParams.get('cc')).toBe('US');
+        expect(url.origin+url.pathname).toBe('https://lua.tools/api/steam/search');
+        expect(url.searchParams.get('q')).toBe('missing & game');
+        expect(String(fetcher.mock.calls[0][0])).toContain('q=missing%20%26%20game');
+        expect(String(fetcher.mock.calls[0][0])).not.toContain('+');
         steam([{ id: 620, name: 'Portal' }, { id: 620, name: 'Duplicate' }, { id: -1, name: 'Bad' }, { id: 1, name: '' }]);
         expect(await searchSteamGames('portal')).toHaveLength(1);
     });
@@ -43,6 +48,29 @@ describe('Steam search fallback', () => {
         vi.stubGlobal('fetch', vi.fn(async (raw: string | URL) => new URL(raw).pathname.includes('storesearch')
             ? Response.json({ items: [{ id: 620, name: 'Portal' }] }) : new Response(null, { status: 503 })));
         expect(await searchSteamGames('portal')).toMatchObject([{ app_id: 620, description: null, genre: [], categories: [] }]);
+    });
+    it('uses the real LuaTools response format and imports its genres, header and release date', async () => {
+        const fetcher=vi.fn(async(raw:string|URL)=>new URL(raw).pathname.endsWith('/search')
+            ? Response.json({results:[{appid:1947910,name:'OPUS: Prism Peak',icon:'https://image.test/icon.jpg'}]})
+            : Response.json({appid:1947910,name:'OPUS: Prism Peak',type:'game',genres:['Adventure','Indie'],headerImage:'https://image.test/header.jpg',releaseDate:'Apr 15, 2026'}));
+        vi.stubGlobal('fetch',fetcher);
+        expect(await searchSteamGames('OPUS: Prism Peak')).toMatchObject([{app_id:1947910,name:'OPUS: Prism Peak',genre:['Adventure','Indie'],image:'https://image.test/header.jpg',release_date:'2026-04-15'}]);
+        expect(fetcher).toHaveBeenCalledTimes(2);
+        expect(new URL(fetcher.mock.calls[1][0]).searchParams.get('appid')).toBe('1947910');
+    });
+    it('falls back to direct Steam only when the LuaTools search fails',async()=>{
+        const fetcher=steam([{id:620,name:'Portal'}]);
+        fetcher.mockImplementationOnce(async()=>new Response(null,{status:503}));
+        expect(await searchSteamGames('portal')).toHaveLength(1);
+        expect(new URL(fetcher.mock.calls[1][0]).hostname).toBe('store.steampowered.com');
+    });
+    it('returns partial LuaTools details when direct Steam is unavailable',async()=>{
+        vi.stubGlobal('fetch',vi.fn(async(raw:string|URL)=>new URL(raw).hostname==='lua.tools'
+            ? Response.json({appid:1947910,name:'OPUS: Prism Peak',genres:['Adventure','Indie'],releaseDate:'Apr 15, 2026'})
+            : new Response(null,{status:503})));
+        const response=await gamesDetailRoute.handle({} as RouteContext,{gameId:1947910},(()=>Promise.resolve([])) as unknown as Sql);
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({metadata_source:'luatools',detail_partial:true,data:{name:'OPUS: Prism Peak',screenshots:[],genres:[{id:null,description:'Adventure'},{id:null,description:'Indie'}]}});
     });
     it('saves missing Steam games and returns stored database IDs with normal pagination', async () => {
         steam([{ id: 620, name: 'Portal' }]);
