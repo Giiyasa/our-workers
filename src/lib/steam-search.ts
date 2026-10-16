@@ -1,8 +1,11 @@
 import type { Sql } from './db';
 import { fetchSteamDetail, mapWithLimit, pickImageUrl, toSteamAppId } from './steam';
 import { fetchLuaToolsSteamDetail } from './luatools-steam';
+import { providerAccessToken } from './fixes-provider';
 
-export class SteamSearchFailure extends Error {}
+export class SteamSearchFailure extends Error {
+    constructor(message: string, public upstreamStatus?: number) { super(message); }
+}
 interface SearchGame {
     app_id: number;
     name: string;
@@ -13,7 +16,7 @@ interface SearchGame {
     release_date?: string | null;
 }
 
-async function searchItems(query: string, proxy: boolean): Promise<unknown[]> {
+async function searchItems(query: string, proxy: boolean, token?: string): Promise<unknown[]> {
     const url = new URL(proxy ? 'https://lua.tools/api/steam/search' : 'https://store.steampowered.com/api/storesearch/');
     // LuaTools returns 401 for '+' spaces, while the same query with '%20' works.
     if (proxy) url.search = `?q=${encodeURIComponent(query)}`;
@@ -22,15 +25,20 @@ async function searchItems(query: string, proxy: boolean): Promise<unknown[]> {
     let payload: unknown;
     try {
         const response = await fetch(url, { signal: AbortSignal.timeout(8000), redirect: 'error',
-            cf: { cacheEverything: true, cacheTtl: 300 } });
+            headers: token && proxy ? { Authorization: `Bearer ${token}` } : undefined,
+            cf: { cacheEverything: !token, cacheTtl: token ? 0 : 300 } });
         if (!response.ok) {
             console.warn('steam_search_provider_failed', { provider: proxy ? 'luatools' : 'steam', status: response.status });
-            throw new SteamSearchFailure('STEAM_SEARCH_HTTP');
+            throw new SteamSearchFailure('STEAM_SEARCH_HTTP', response.status);
         }
         const text = await response.text();
         if (text.length > 1_000_000) throw new SteamSearchFailure('STEAM_SEARCH_SIZE');
         payload = JSON.parse(text);
-    } catch { throw new SteamSearchFailure('STEAM_SEARCH_UNAVAILABLE'); }
+    } catch (error) {
+        if (error instanceof SteamSearchFailure) throw error;
+        console.warn('steam_search_request_failed', { provider: proxy ? 'luatools' : 'steam', reason: error instanceof Error && error.name === 'TimeoutError' ? 'timeout' : 'network_or_format' });
+        throw new SteamSearchFailure('STEAM_SEARCH_UNAVAILABLE');
+    }
     const items = payload && typeof payload === 'object' ? (payload as Record<string, unknown>)[proxy ? 'results' : 'items'] : null;
     if (!Array.isArray(items)) {
         throw new SteamSearchFailure('STEAM_SEARCH_FORMAT');
@@ -39,13 +47,25 @@ async function searchItems(query: string, proxy: boolean): Promise<unknown[]> {
 }
 
 /** LuaTools public Steam proxy first; direct Steam is a fallback for proxy outages. */
-export async function searchSteamGames(query: string): Promise<SearchGame[]> {
+export async function searchSteamGames(query: string, context?: { sql: Sql; env: Env }): Promise<SearchGame[]> {
     let items: unknown[], proxy = true;
     try { items = await searchItems(query, true); }
-    catch {
+    catch (error) {
         console.warn('steam_search_proxy_unavailable', { provider: 'luatools' });
-        proxy = false;
-        items = await searchItems(query, false);
+        let recovered: unknown[] | undefined;
+        if (context && error instanceof SteamSearchFailure && [401,403].includes(error.upstreamStatus ?? 0)) {
+            try {
+                // Search is metadata, not a download: never reserve user/provider download usage.
+                const credential = await providerAccessToken(context.sql, context.env, true, [], false);
+                recovered = await searchItems(query, true, credential.token);
+            } catch (authError) {
+                const code = authError && typeof authError === 'object' && 'code' in authError ? String(authError.code) : '';
+                console.warn('steam_search_authenticated_failed', { status: authError instanceof SteamSearchFailure ? authError.upstreamStatus : undefined,
+                    reason: authError instanceof SteamSearchFailure ? authError.message : /^[A-Z_]{1,60}$/.test(code) ? code : 'SESSION_UNAVAILABLE' });
+            }
+        }
+        if (recovered !== undefined) items = recovered;
+        else { proxy = false; items = await searchItems(query, false); }
     }
     const seen = new Set<number>();
     const games: SearchGame[] = [];

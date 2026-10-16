@@ -84,7 +84,7 @@ export const gamesListRoute: DbRoute<ListInput> = {
 			},
 		};
 	},
-	handle: async ({}, input, sql) => {
+	handle: async ({ env }, input, sql) => {
 		const { page, pageSize, countOnly, search, genres, categories, tagWarning } = input;
 
 		const conditions = [];
@@ -204,9 +204,16 @@ export const gamesListRoute: DbRoute<ListInput> = {
 
         const steamFallback = async () => {
             let saved;
-            try { saved = await saveSteamSearchGames(sql, await searchSteamGames(search)); }
+            try { saved = await saveSteamSearchGames(sql, await searchSteamGames(search, { sql, env })); }
             catch (error) {
-                if (error instanceof SteamSearchFailure) return fail(502, 'Pencarian Steam sementara tidak tersedia. Coba lagi nanti.', 'STEAM_SEARCH_UNAVAILABLE');
+                if (error instanceof SteamSearchFailure) {
+                    const warning = { code: 'STEAM_SEARCH_UNAVAILABLE', message: 'Katalog lokal sudah diperiksa, tetapi pencarian eksternal sementara gagal. Coba lagi nanti.' };
+                    const metadata = { ok: true, total: 0, total_approximate: true, page_size: pageSize, total_pages: 1,
+                        search_source: 'database', search_incomplete: true, search_warning: warning };
+                    if (countOnly) return json(metadata);
+                    return json({ ...metadata, count: 0, page, has_more: false, search,
+                        filters: { genre: genres, category: categories, tag_warning: tagWarning }, data: [] });
+                }
                 const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
                 console.error('steam_search_catalog_save_failed', { code: /^[A-Z0-9_]{1,40}$/.test(code) ? code : 'DATABASE_ERROR' });
                 return fail(503, 'Hasil Steam belum berhasil disimpan ke katalog. Coba lagi nanti.', 'STEAM_CATALOG_SAVE_FAILED');

@@ -341,9 +341,9 @@ export async function refreshProviderSession(sql: Sql, env: Env, id: string, aut
     console.info('fixes_session_refresh_completed', { accountId: id, automatic, outcome: upstreamStatus === undefined ? 'skipped' : 'refreshed' });
     return upstreamStatus !== undefined;
 }
-// Every call reserves one upstream attempt, atomically, before contacting provider.
-// Failed/uncertain requests also count; never refund an upstream attempt.
-export async function providerAccessToken(sql: Sql, env: Env, allowRefresh = true, excludedAccountIds: string[] = []): Promise<{
+// Downloads reserve one upstream attempt atomically; failed attempts remain counted.
+// Metadata reads can request a session without consuming download capacity.
+export async function providerAccessToken(sql: Sql, env: Env, allowRefresh = true, excludedAccountIds: string[] = [], reserveDownload = true): Promise<{
     token: string;
     version: string;
     accountId: string;
@@ -356,10 +356,11 @@ export async function providerAccessToken(sql: Sql, env: Env, allowRefresh = tru
  from fixes_provider_accounts a left join fixes_provider_usage u on u.account_id=a.account_id and u.usage_day=(now() at time zone 'Asia/Jakarta')::date
  where a.status='ready' and a.expires_at>now()+interval '30 seconds' and (a.blocked_until is null or a.blocked_until<=now())
  and not (a.account_id::text = any(${excludedAccountIds}::text[]))
- and coalesce(u.download_count,0)<${FIXES_CONFIG.dailyLimit}
+ and (${reserveDownload} = false or coalesce(u.download_count,0)<${FIXES_CONFIG.dailyLimit})
  order by coalesce(u.download_count,0),a.account_id for update of a skip locked limit 1`;
         if (!candidates[0])
             return null;
+        if (!reserveDownload) return candidates[0];
         const id = candidates[0].account_id;
         const reserved = await tx `insert into fixes_provider_usage(account_id,usage_day,download_count)
  values(${id}::uuid,(now() at time zone 'Asia/Jakarta')::date,1)
@@ -375,12 +376,12 @@ export async function providerAccessToken(sql: Sql, env: Env, allowRefresh = tru
  where (a.status='ready' or (a.status='needs_admin' and a.last_error_code='SESSION_EXPIRED'))
  and not (a.account_id::text = any(${excludedAccountIds}::text[]))
  and a.expires_at<=now()+interval '30 seconds' and (a.blocked_until is null or a.blocked_until<=now())
- and coalesce(u.download_count,0)<${FIXES_CONFIG.dailyLimit}
+ and (${reserveDownload} = false or coalesce(u.download_count,0)<${FIXES_CONFIG.dailyLimit})
  order by coalesce(u.download_count,0),a.account_id limit 4`;
             for (const account of expired) {
                 try {
                     await refreshProviderSession(sql, env, account.account_id, true);
-                    return await providerAccessToken(sql, env, false, excludedAccountIds);
+                    return await providerAccessToken(sql, env, false, excludedAccountIds, reserveDownload);
                 } catch (error) {
                     if (!(error instanceof FixesFailure)) throw error;
                     console.warn('fixes_account_refresh_skipped', { accountId: account.account_id, code: error.code });
@@ -393,13 +394,13 @@ export async function providerAccessToken(sql: Sql, env: Env, allowRefresh = tru
         const s = JSON.parse(new TextDecoder().decode(await decryptAsset(row.encrypted, env.FIXES_SESSION_KEY_HEX))) as ProviderSession;
         if (typeof s.access_token !== 'string' || !s.access_token)
             throw new Error();
-        console.info('fixes_account_reserved', { accountId: row.account_id, dailyLimit: FIXES_CONFIG.dailyLimit });
+        console.info(reserveDownload ? 'fixes_account_reserved' : 'fixes_account_metadata_selected', { accountId: row.account_id, dailyLimit: FIXES_CONFIG.dailyLimit });
         return { token: s.access_token, version: row.version, accountId: row.account_id };
     }
     catch {
         await sql `update fixes_provider_accounts set status='needs_admin',last_error_code='SESSION_DECRYPT',updated_at=now() where account_id=${row.account_id}::uuid and xmin::text=${row.version}`;
         console.warn('fixes_account_session_invalid', { accountId: row.account_id, code: 'SESSION_DECRYPT' });
-        if (excludedAccountIds.length < 3) return providerAccessToken(sql, env, allowRefresh, [...excludedAccountIds, row.account_id]);
+        if (excludedAccountIds.length < 3) return providerAccessToken(sql, env, allowRefresh, [...excludedAccountIds, row.account_id], reserveDownload);
         throw new FixesFailure('SESSION_DECRYPT');
     }
 }

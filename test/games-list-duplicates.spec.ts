@@ -51,13 +51,13 @@ describe('Steam search catalog imports', () => {
     db = new PGlite();
     await db.exec(`create table game_lists (
       id bigint generated always as identity primary key, app_id bigint not null, name text not null,
-      image text, description text, genre text[], categories text[], publishers text[],
+      image text, description text, genre text[], categories text[], publishers text[], release_date date,
       is_unavailable_game boolean default false,
       search_key text generated always as (lower(name)) stored
     );
     insert into game_lists(app_id,name,is_unavailable_game) values(620,'Existing title',true);`);
     const games = [{ app_id: 620, name: 'Replacement', image: 'https://image.test/a.jpg', description: null, genre: ['Action'], categories: [] },
-      { app_id: 730, name: 'New Steam Game', image: 'https://image.test/b.jpg', description: 'Steam description', genre: ['Action'], categories: ['Multi-player'] }];
+      { app_id: 730, name: 'New Steam Game', image: 'https://image.test/b.jpg', description: 'Steam description', genre: ['Action'], categories: ['Multi-player'], release_date: '2026-04-15' }];
     const sql = databaseSql(db);
     const results = await Promise.all([saveSteamSearchGames(sql, games), saveSteamSearchGames(sql, games)]);
     expect(results[0].map(row => Number(row.app_id))).toEqual([620, 730]);
@@ -66,6 +66,7 @@ describe('Steam search catalog imports', () => {
     expect(rows[0]).toMatchObject({ name: 'Existing title', is_unavailable_game: true });
     expect(rows[1]).toMatchObject({ name: 'New Steam Game', genre: ['Action'], categories: ['Multi-player'], search_key: 'new steam game' });
     expect(results[0].map(row => row.id)).toEqual(results[1].map(row => row.id));
+    expect((await db.query('select release_date::text as date from game_lists where app_id=730')).rows).toEqual([{date:'2026-04-15'}]);
   });
 });
 

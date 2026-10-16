@@ -403,6 +403,12 @@ describe('multiaccount provider controls', () => {
         await expect(providerAccessToken(sqlMock(q=>{queries.push(q);return [];}),{} as Env)).rejects.toMatchObject({code:'SESSION_CONFIG'});
         expect(queries).toHaveLength(0);
     });
+    it('selects a metadata session without inserting provider download usage',async()=>{
+        const row=await sessionRow(),queries:string[]=[];
+        const sql=sqlMock(q=>{queries.push(q);return q.includes('select a.account_id')?[row]:[];});
+        expect((await providerAccessToken(sql,env,true,[],false)).accountId).toBe(row.account_id);
+        expect(queries.every(q=>!q.includes('insert into fixes_provider_usage'))).toBe(true);
+    });
     it.each([503,429])('temporary refresh HTTP %s records a cooldown and never resets quota',async status=>{
         const row=await sessionRow(),queries:string[]=[];
         vi.stubGlobal('fetch',vi.fn().mockResolvedValue(new Response(null,{status})));

@@ -26,6 +26,9 @@ function sqlFor(db,clock){const sql=(parts,...values)=>{
  assert.equal(poolAttempts.filter(result=>result.status==='fulfilled').length,48,'two fresh accounts reserve exactly 48 attempts under concurrent callers');
  for(const result of poolAttempts.filter(result=>result.status==='rejected'))assert.equal(result.reason.code,'PROVIDER_UNAVAILABLE');
  assert.ok((await db.query('select download_count from fixes_provider_usage')).rows.every(row=>row.download_count===24));
+ const metadataSession=await realFixes.providerAccessToken(sqlFor(db),{FIXES_SESSION_KEY_HEX:'11'.repeat(32)},false,[],false);
+ assert.ok(metadataSession.token,'metadata may read an eligible session even when its download quota is exhausted');
+ assert.ok((await db.query('select download_count from fixes_provider_usage')).rows.every(row=>row.download_count===24),'metadata must not change usage');
  await db.close();console.log('PASS: concurrent user slots stop at 25; next slot gives 25 more (50/day); migration repeatable; Hubcap capped at 24; 60 concurrent Luie/fixes reservations yield exactly 48 across two fresh accounts, with each capped at 24.');
 })().catch(e=>{console.error(e);process.exit(1);});
 

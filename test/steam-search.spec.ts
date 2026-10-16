@@ -2,10 +2,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { searchSteamGames, saveSteamSearchGames } from '../src/lib/steam-search';
 import { gamesListRoute } from '../src/routes/games-list';
 import { gamesDetailRoute } from '../src/routes/games-detail';
+import { providerAccessToken } from '../src/lib/fixes-provider';
 import type { Sql } from '../src/lib/db';
 import type { RouteContext } from '../src/lib/types';
 
 vi.mock('../src/lib/fuzzy', () => ({ hasLevenshtein: async () => false }));
+vi.mock('../src/lib/fixes-provider', () => ({ providerAccessToken: vi.fn() }));
 vi.mock('../src/lib/steam-search', async original => ({
     ...await original<typeof import('../src/lib/steam-search')>(), saveSteamSearchGames: vi.fn(),
 }));
@@ -91,10 +93,33 @@ describe('Steam search fallback', () => {
         expect(await (await request({ countOnly: true })).json()).toMatchObject({ total: 1, search_source: 'steam' });
         expect(await (await request({ genre: 'Racing' })).json()).toMatchObject({ total: 0, data: [] });
     });
-    it('returns a clear 502 for unavailable Steam and never presents unsaved results', async () => {
+    it('keeps the catalog response usable while marking external search incomplete on outages', async () => {
         steam([], 503);
-        expect((await request()).status).toBe(502);
+        const response = await request();
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({ ok:true, data:[], total_approximate:true, search_incomplete:true, search_warning:{code:'STEAM_SEARCH_UNAVAILABLE'} });
         expect(saveSteamSearchGames).not.toHaveBeenCalled();
+    });
+    it('does not claim a definitive zero count when external count search fails',async()=>{
+        steam([],503);
+        expect(await (await request({countOnly:true})).json()).toMatchObject({total:0,total_approximate:true,search_incomplete:true});
+    });
+    it('retries a LuaTools 401 using a metadata session without reserving download usage or caching its response',async()=>{
+        const sql={} as Sql,env={} as Env;
+        vi.mocked(providerAccessToken).mockResolvedValue({token:'synthetic-metadata-token',accountId:'fixture',version:'1'});
+        const fetcher=vi.fn(async(raw:string|URL,init?:RequestInit)=>{
+            const url=new URL(raw);
+            if(url.pathname.endsWith('/search'))return init?.headers
+                ? Response.json({results:[{appid:620,name:'Portal'}]}) : new Response(null,{status:401});
+            return new Response(null,{status:503});
+        });
+        vi.stubGlobal('fetch',fetcher);
+        expect(await searchSteamGames('portal',{sql,env})).toMatchObject([{app_id:620,name:'Portal'}]);
+        expect(providerAccessToken).toHaveBeenCalledWith(sql,env,true,[],false);
+        const authCall=fetcher.mock.calls.find(([,init])=>(init?.headers as any)?.Authorization);
+        expect(String(authCall?.[0])).toContain('https://lua.tools/api/steam/search');
+        expect(authCall?.[1]).toMatchObject({headers:{Authorization:'Bearer synthetic-metadata-token'},cf:{cacheEverything:false,cacheTtl:0}});
+        for(const [raw,init] of fetcher.mock.calls)if(new URL(raw).hostname!=='lua.tools')expect(new Headers(init?.headers).has('Authorization')).toBe(false);
     });
     it('returns 503 when catalog persistence fails instead of presenting an unclaimable result', async () => {
         steam([{ id: 620, name: 'Portal' }]);
