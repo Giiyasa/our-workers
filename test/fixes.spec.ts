@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { SELF } from 'cloudflare:test';
 import worker from "../src/index";
-import { syncListings, allowedDownloadUrl, isPublicDownloadAddress, digest, fetchFixPackage, providerAccessToken, saveProviderSession, refreshProviderSession, validateDownloadHosts, validateFix } from '../src/lib/fixes-provider';
+import { syncListings, allowedDownloadUrl, isPublicDownloadAddress, digest, fetchFixPackage, providerAccessToken, withProviderAccount, FixesFailure, saveProviderSession, refreshProviderSession, validateDownloadHosts, validateFix } from '../src/lib/fixes-provider';
 import { packageObjectKey, storePackage } from '../src/lib/fixes-storage';
 import { fixesDetailRoute, fixesAdminSyncRoute, fixesListRoute, fixesPrepareRoute, fixesDownloadRoute } from '../src/routes/fixes';
 import { encryptAsset } from '../src/lib/asset-crypto';
+import { fetchProviderLua } from '../src/lib/asset-providers';
 import type { Sql } from '../src/lib/db';
 import type { RouteContext } from '../src/lib/types';
 vi.mock('../src/lib/session-guard', async (importOriginal) => {
@@ -275,7 +276,7 @@ describe('multiaccount provider controls', () => {
             q: string;
             v: unknown[];
         }[] = [];
-        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 401 })));
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 403 })));
         await expect(fetchFixPackage(sqlMock((q, v) => { calls.push({ q, v }); return q.includes('select download_hosts') ? [{ download_hosts: ['packages.test'] }] : [row]; }), env, 'fixture', 'fix')).rejects.toMatchObject({ code: 'PROVIDER_AUTH' });
         const invalidation = calls.find(c => c.q.includes("last_error_code='PROVIDER_AUTH'"))!;
         expect(invalidation.q).toContain('xmin::text=');
@@ -286,7 +287,11 @@ describe('multiaccount provider controls', () => {
         const calls: string[] = [];
         const fetcher = vi.fn().mockResolvedValue(new Response(null, { status: 429 }));
         vi.stubGlobal('fetch', fetcher);
-        await expect(fetchFixPackage(sqlMock(q => { calls.push(q); return q.includes('select download_hosts') ? [{ download_hosts: ['packages.test'] }] : [row]; }), env, 'fixture', 'fix')).rejects.toMatchObject({ code: 'PROVIDER_LIMIT' });
+        await expect(fetchFixPackage(sqlMock((q,v) => {
+            calls.push(q);
+            if (q.includes('select a.account_id') && v.some(value => Array.isArray(value) && value.includes(row.account_id))) return [];
+            return q.includes('select download_hosts') ? [{ download_hosts: ['packages.test'] }] : [row];
+        }), env, 'fixture', 'fix')).rejects.toMatchObject({ code: 'PROVIDER_LIMIT' });
         expect(calls.some(q => q.includes('insert into fixes_provider_usage'))).toBe(true);
         expect(calls.some(q => q.includes('blocked_until=') && q.includes('Asia/Jakarta'))).toBe(true);
         expect(fetcher).toHaveBeenCalledTimes(1);
@@ -354,6 +359,108 @@ describe('multiaccount provider controls', () => {
         for (const h of ['127.0.0.1', 'https://packages.test', '*.packages.test', 'localhost', 'a.localhost'])
             expect(() => validateDownloadHosts([h])).toThrow();
         expect(validateDownloadHosts(['Packages.test', 'packages.test'])).toEqual(['packages.test']);
+    });
+    it.each([401,403,429])('rotates Luie HTTP %s to another account before using Hubcap', async status => {
+        const first=await sessionRow(), second={...first,account_id:'bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee'};
+        let reservations=0;
+        const sql=sqlMock((q,v)=>{
+            if(q.includes('select a.account_id') && q.includes('limit 4'))return [];
+            if(q.includes('select a.account_id')) {
+                const excluded=v.find(Array.isArray) as string[];
+                return [first,second].filter(row=>!excluded.includes(row.account_id)).slice(0,1);
+            }
+            if(q.includes('insert into fixes_provider_usage')) {reservations++;return [{download_count:1}];}
+            return [];
+        });
+        let luieRequests=0;
+        const fetcher=vi.fn(async(raw:string|URL)=>{
+            if(new URL(raw).hostname==='generator.ryuu.lol')return new Response(null,{status:404});
+            luieRequests++;
+            return luieRequests===1?new Response(null,{status}):new Response('addappid(620, 0, "fixture")');
+        });
+        vi.stubGlobal('fetch',fetcher);
+        expect((await fetchProviderLua(sql,{...env,RYUU_AUTH_CODE:'fixture',HUBCAP_API_KEYS:'[]'},620)).source).toBe('luatools_luie');
+        expect(reservations).toBe(2);expect(luieRequests).toBe(2);expect(fetcher).toHaveBeenCalledTimes(3);
+    });
+    it('skips an undecryptable account and keeps its attempted reservation counted',async()=>{
+        const valid=await sessionRow(),broken={...valid,account_id:'bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee',encrypted:'00'};
+        let reservations=0;const queries:string[]=[];
+        const sql=sqlMock((q,v)=>{
+            queries.push(q);
+            if(q.includes('select a.account_id')) {
+                const excluded=v.find(Array.isArray) as string[];
+                return excluded.includes(broken.account_id)?[valid]:[broken];
+            }
+            if(q.includes('insert into fixes_provider_usage')){reservations++;return [{download_count:1}];}
+            return [];
+        });
+        expect((await providerAccessToken(sql,env)).accountId).toBe(valid.account_id);
+        expect(reservations).toBe(2);
+        expect(queries.some(q=>q.includes("last_error_code='SESSION_DECRYPT'")&&q.includes('xmin::text'))).toBe(true);
+    });
+    it('does not reserve or invalidate any account when the encryption key is missing',async()=>{
+        const queries:string[]=[];
+        await expect(providerAccessToken(sqlMock(q=>{queries.push(q);return [];}),{} as Env)).rejects.toMatchObject({code:'SESSION_CONFIG'});
+        expect(queries).toHaveLength(0);
+    });
+    it.each([503,429])('temporary refresh HTTP %s records a cooldown and never resets quota',async status=>{
+        const row=await sessionRow(),queries:string[]=[];
+        vi.stubGlobal('fetch',vi.fn().mockResolvedValue(new Response(null,{status})));
+        await expect(refreshProviderSession(sqlMock(q=>{queries.push(q);return [row];}),env,token,true)).rejects.toMatchObject({code:'PROVIDER_HTTP',upstreamStatus:status});
+        expect(queries.some(q=>q.includes("greatest(blocked_until,now()+interval '60 seconds')"))).toBe(true);
+        expect(queries.every(q=>!q.includes('fixes_provider_usage')&&!q.includes("last_error_code='REFRESH_REJECTED'"))).toBe(true);
+    });
+    it('rejects empty or malformed refresh responses without saving unusable tokens',async()=>{
+        const row=await sessionRow(),queries:string[]=[];
+        vi.stubGlobal('fetch',vi.fn().mockResolvedValue(Response.json({access_token:'',refresh_token:'',expires_in:3600})));
+        await expect(refreshProviderSession(sqlMock(q=>{queries.push(q);return [row];}),env,token,true)).rejects.toMatchObject({code:'REFRESH_FORMAT'});
+        expect(queries.every(q=>!q.includes('set session_encrypted='))).toBe(true);
+    });
+    it('recovers a Luie 401 once through refresh and counts the retry without going to Hubcap',async()=>{
+        const row=await sessionRow();let reservations=0,refreshes=0,downloads=0;
+        const sql=sqlMock((q)=>{
+            if(q.includes('select a.account_id')&&q.includes('limit 4'))return [];
+            if(q.includes('select a.account_id')||q.includes('select encode(session_encrypted'))return [row];
+            if(q.includes('insert into fixes_provider_usage')){reservations++;return [{download_count:reservations}];}
+            if(q.includes('returning account_id'))return [{account_id:row.account_id}];
+            return [];
+        });
+        vi.stubGlobal('fetch',vi.fn(async(raw:string|URL)=>{
+            const url=new URL(raw);
+            if(url.hostname==='generator.ryuu.lol')return new Response(null,{status:404});
+            if(url.pathname.endsWith('/token')){refreshes++;return Response.json({access_token:'new-access',refresh_token:'new-refresh',expires_in:3600});}
+            downloads++;return downloads===1?new Response(null,{status:401}):new Response('addappid(620, 0, "fixture")');
+        }));
+        expect((await fetchProviderLua(sql,{...env,RYUU_AUTH_CODE:'fixture',HUBCAP_API_KEYS:'[]'},620)).source).toBe('luatools_luie');
+        expect(refreshes).toBe(1);expect(downloads).toBe(2);expect(reservations).toBe(2);
+    });
+    it('continues to another expired account after the first refresh is rejected',async()=>{
+        const row=await sessionRow(),other='bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee';let renewed=false;
+        const sql=sqlMock(q=>{
+            if(q.includes('select a.account_id')&&q.includes('limit 4'))return [{account_id:token},{account_id:other}];
+            if(q.includes('select a.account_id'))return renewed?[{...row,account_id:other}]:[];
+            if(q.includes('select encode(session_encrypted'))return [row];
+            if(q.includes('set session_encrypted=')){renewed=true;return [];}
+            if(q.includes('insert into fixes_provider_usage'))return [{download_count:1}];
+            return [];
+        });
+        const fetcher=vi.fn().mockResolvedValueOnce(new Response(null,{status:400})).mockResolvedValueOnce(Response.json({access_token:'new-access',refresh_token:'new-refresh',expires_in:3600}));
+        vi.stubGlobal('fetch',fetcher);
+        expect((await providerAccessToken(sql,env)).accountId).toBe(other);expect(fetcher).toHaveBeenCalledTimes(2);
+    });
+    it('caps account attempts at four and never selects an already rejected account',async()=>{
+        const row=await sessionRow(),ids=['aaaaaaaa','bbbbbbbb','cccccccc','dddddddd','eeeeeeee'].map(prefix=>`${prefix}-bbbb-4ccc-8ddd-eeeeeeeeeeee`);
+        let reservations=0;const selected:string[]=[];
+        const sql=sqlMock((q,v)=>{
+            if(q.includes('select a.account_id')){
+                const excluded=v.find(Array.isArray) as string[];
+                const id=ids.find(id=>!excluded.includes(id));return id?[{...row,account_id:id}]:[];
+            }
+            if(q.includes('insert into fixes_provider_usage')){reservations++;return [{download_count:1}];}
+            return [];
+        });
+        await expect(withProviderAccount(sql,env,async credential=>{selected.push(credential.accountId);throw new FixesFailure('PROVIDER_AUTH',403);})).rejects.toMatchObject({code:'PROVIDER_AUTH'});
+        expect(selected).toEqual(ids.slice(0,4));expect(reservations).toBe(4);
     });
 });
 

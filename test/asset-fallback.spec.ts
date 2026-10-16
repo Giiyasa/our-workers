@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { encryptAsset, decryptAsset } from "../src/lib/asset-crypto";
 import { fetchProviderLua, readLua, readLuaToolsPackage } from "../src/lib/asset-providers";
-import { providerAccessToken } from "../src/lib/fixes-provider";
+import { providerAccessToken, withProviderAccount } from "../src/lib/fixes-provider";
 import { deflateRawSync } from "node:zlib";
 import { luaZipCrc } from "../src/lib/lua-archive";
 import type { Sql } from "../src/lib/db";
@@ -9,8 +9,12 @@ import type { Sql } from "../src/lib/db";
 vi.mock("../src/lib/fixes-provider", async importOriginal => ({
     ...await importOriginal<typeof import("../src/lib/fixes-provider")>(),
     providerAccessToken: vi.fn(),
+    withProviderAccount: vi.fn(),
 }));
-beforeEach(()=>{vi.mocked(providerAccessToken).mockReset().mockRejectedValue(new Error("no provider account"));});
+beforeEach(()=>{
+    vi.mocked(providerAccessToken).mockReset().mockRejectedValue(new Error("no provider account"));
+    vi.mocked(withProviderAccount).mockImplementation(async (sql,env,operation)=>operation(await providerAccessToken(sql,env)));
+});
 const key = "11".repeat(32); // synthetic test key, never production credentials
 const lua = 'addappid(620, 0, "fixture")\n';
 const env = { RYUU_AUTH_CODE: "test-code", HUBCAP_API_KEYS: "[]" } as Env;

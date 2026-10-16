@@ -279,8 +279,10 @@ export async function saveProviderSession(sql: Sql, env: Env, input: {
     // Deliberately preserve usage and blocked_until across login and refresh.
     return id;
 }
-export async function refreshProviderSession(sql: Sql, env: Env, id: string, automatic = false): Promise<void> {
+export async function refreshProviderSession(sql: Sql, env: Env, id: string, automatic = false): Promise<boolean> {
     accountId(id);
+    if (!/^[a-f\d]{64}$/i.test(env.FIXES_SESSION_KEY_HEX ?? '')) throw new FixesFailure('SESSION_CONFIG');
+    let upstreamStatus: number | undefined;
     const result = await sql.begin(async (tx) => {
         // Recheck under the lock: another queue job may have already rotated the token.
         const rows = automatic
@@ -292,49 +294,68 @@ export async function refreshProviderSession(sql: Sql, env: Env, id: string, aut
             if (automatic) return null;
             throw new FixesFailure('SESSION_MISSING');
         }
-        const s = JSON.parse(new TextDecoder().decode(await decryptAsset(rows[0].encrypted, env.FIXES_SESSION_KEY_HEX))) as ProviderSession;
+        let s: ProviderSession;
+        try {
+            s = JSON.parse(new TextDecoder().decode(await decryptAsset(rows[0].encrypted, env.FIXES_SESSION_KEY_HEX))) as ProviderSession;
+            if (typeof s.refresh_token !== 'string' || !s.refresh_token.trim()) throw new Error();
+        } catch {
+            await tx`update fixes_provider_accounts set status='needs_admin',last_error_code='SESSION_DECRYPT',updated_at=now() where account_id=${id}::uuid`;
+            return 'SESSION_DECRYPT';
+        }
+        const temporaryFailure = async (code: string) => {
+            await tx`update fixes_provider_accounts set status=case when status='disabled' then 'disabled' else 'ready' end,last_error_code=${code},
+ blocked_until=greatest(blocked_until,now()+interval '60 seconds'),updated_at=now() where account_id=${id}::uuid`;
+            return code;
+        };
         let res: Response;
         try {
             res = await fetch(`${AUTH}/token?grant_type=refresh_token`, { method: 'POST', headers: { apikey: FIXES_CONFIG.anonKey, 'content-type': 'application/json' },
-                body: JSON.stringify({ refresh_token: s.refresh_token }), redirect: 'manual', signal: AbortSignal.timeout(20000) });
+                body: JSON.stringify({ refresh_token: s.refresh_token }), redirect: 'manual', signal: AbortSignal.timeout(8000) });
         }
         catch {
-            return 'PROVIDER_NETWORK';
+            return temporaryFailure('PROVIDER_NETWORK');
         }
+        upstreamStatus = res.status;
         if (!res.ok) {
             await res.body?.cancel();
-            if (![400, 401, 403].includes(res.status)) return 'PROVIDER_HTTP';
+            if (![400, 401, 403].includes(res.status)) return temporaryFailure('PROVIDER_HTTP');
             await tx `update fixes_provider_accounts set status='needs_admin',last_error_code='REFRESH_REJECTED',updated_at=now() where account_id=${id}::uuid`;
             return 'REFRESH_REJECTED';
         }
-        const data = await res.json() as {
+        const data = await res.json().catch(() => null) as {
             access_token?: string;
             refresh_token?: string;
             expires_in?: number;
-        };
-        if (typeof data.access_token !== 'string' || typeof data.refresh_token !== 'string' || !Number.isFinite(data.expires_in) || data.expires_in! <= 0)
-            return 'REFRESH_FORMAT';
+        } | null;
+        if (!data || typeof data.access_token !== 'string' || !data.access_token.trim() || typeof data.refresh_token !== 'string' || !data.refresh_token.trim() || !Number.isFinite(data.expires_in) || data.expires_in! <= 0)
+            return temporaryFailure('REFRESH_FORMAT');
         const blob = await encryptAsset(new TextEncoder().encode(JSON.stringify({ access_token: data.access_token, refresh_token: data.refresh_token })), env.FIXES_SESSION_KEY_HEX);
         await tx `update fixes_provider_accounts set session_encrypted=decode(${Buffer.from(blob).toString('hex')},'hex'),
  expires_at=now()+${data.expires_in!}*interval '1 second',status=case when status='disabled' then 'disabled' else 'ready' end,last_error_code=null,updated_at=now() where account_id=${id}::uuid`;
         return null;
     });
-    if (result)
-        throw new FixesFailure(result);
+    if (result) {
+        console.warn('fixes_session_refresh_failed', { accountId: id, automatic, code: result, upstreamStatus });
+        throw new FixesFailure(result, upstreamStatus);
+    }
+    console.info('fixes_session_refresh_completed', { accountId: id, automatic, outcome: upstreamStatus === undefined ? 'skipped' : 'refreshed' });
+    return upstreamStatus !== undefined;
 }
 // Every call reserves one upstream attempt, atomically, before contacting provider.
 // Failed/uncertain requests also count; never refund an upstream attempt.
-export async function providerAccessToken(sql: Sql, env: Env, allowRefresh = true): Promise<{
+export async function providerAccessToken(sql: Sql, env: Env, allowRefresh = true, excludedAccountIds: string[] = []): Promise<{
     token: string;
     version: string;
     accountId: string;
 }> {
+    if (!/^[a-f\d]{64}$/i.test(env.FIXES_SESSION_KEY_HEX ?? '')) throw new FixesFailure('SESSION_CONFIG');
     const row = await sql.begin(async (tx) => {
         await tx `update fixes_provider_accounts set status='needs_admin',last_error_code='SESSION_EXPIRED',updated_at=now()
  where status='ready' and expires_at<=now()+interval '30 seconds'`;
         const candidates = await tx `select a.account_id::text,encode(a.session_encrypted,'hex') as encrypted,a.xmin::text as version
  from fixes_provider_accounts a left join fixes_provider_usage u on u.account_id=a.account_id and u.usage_day=(now() at time zone 'Asia/Jakarta')::date
  where a.status='ready' and a.expires_at>now()+interval '30 seconds' and (a.blocked_until is null or a.blocked_until<=now())
+ and not (a.account_id::text = any(${excludedAccountIds}::text[]))
  and coalesce(u.download_count,0)<${FIXES_CONFIG.dailyLimit}
  order by coalesce(u.download_count,0),a.account_id for update of a skip locked limit 1`;
         if (!candidates[0])
@@ -352,16 +373,17 @@ export async function providerAccessToken(sql: Sql, env: Env, allowRefresh = tru
             const expired = await sql `select a.account_id::text from fixes_provider_accounts a
  left join fixes_provider_usage u on u.account_id=a.account_id and u.usage_day=(now() at time zone 'Asia/Jakarta')::date
  where (a.status='ready' or (a.status='needs_admin' and a.last_error_code='SESSION_EXPIRED'))
+ and not (a.account_id::text = any(${excludedAccountIds}::text[]))
  and a.expires_at<=now()+interval '30 seconds' and (a.blocked_until is null or a.blocked_until<=now())
  and coalesce(u.download_count,0)<${FIXES_CONFIG.dailyLimit}
  order by coalesce(u.download_count,0),a.account_id limit 4`;
             for (const account of expired) {
                 try {
                     await refreshProviderSession(sql, env, account.account_id, true);
-                    return await providerAccessToken(sql, env, false);
+                    return await providerAccessToken(sql, env, false, excludedAccountIds);
                 } catch (error) {
                     if (!(error instanceof FixesFailure)) throw error;
-                    console.warn('fixes_session_refresh_failed', { code: error.code });
+                    console.warn('fixes_account_refresh_skipped', { accountId: account.account_id, code: error.code });
                 }
             }
         }
@@ -371,12 +393,67 @@ export async function providerAccessToken(sql: Sql, env: Env, allowRefresh = tru
         const s = JSON.parse(new TextDecoder().decode(await decryptAsset(row.encrypted, env.FIXES_SESSION_KEY_HEX))) as ProviderSession;
         if (typeof s.access_token !== 'string' || !s.access_token)
             throw new Error();
+        console.info('fixes_account_reserved', { accountId: row.account_id, dailyLimit: FIXES_CONFIG.dailyLimit });
         return { token: s.access_token, version: row.version, accountId: row.account_id };
     }
     catch {
         await sql `update fixes_provider_accounts set status='needs_admin',last_error_code='SESSION_DECRYPT',updated_at=now() where account_id=${row.account_id}::uuid and xmin::text=${row.version}`;
+        console.warn('fixes_account_session_invalid', { accountId: row.account_id, code: 'SESSION_DECRYPT' });
+        if (excludedAccountIds.length < 3) return providerAccessToken(sql, env, allowRefresh, [...excludedAccountIds, row.account_id]);
         throw new FixesFailure('SESSION_DECRYPT');
     }
+}
+
+/** Rotate only account-specific auth/quota failures. Every attempted account remains counted. */
+export async function withProviderAccount<T>(sql: Sql, env: Env, operation: (credential: Awaited<ReturnType<typeof providerAccessToken>>) => Promise<T>): Promise<T> {
+    const attempted: string[] = [];
+    const recovered = new Set<string>();
+    const deadline = Date.now() + 90_000;
+    let lastFailure: FixesFailure | undefined;
+    for (let attempt = 0; attempt < 4 && Date.now() < deadline; attempt++) {
+        let credential: Awaited<ReturnType<typeof providerAccessToken>>;
+        try { credential = await providerAccessToken(sql, env, true, attempted); }
+        catch (error) {
+            if (error instanceof FixesFailure && error.code === 'PROVIDER_UNAVAILABLE' && lastFailure) throw lastFailure;
+            throw error;
+        }
+        attempted.push(credential.accountId);
+        try { return await operation(credential); }
+        catch (error) {
+            if (!(error instanceof FixesFailure) || !['PROVIDER_AUTH', 'PROVIDER_LIMIT'].includes(error.code)) throw error;
+            lastFailure = error;
+            if (error.code === 'PROVIDER_AUTH') {
+                // An early/revoked access token may still have a usable refresh token.
+                // Invalidate only the exact session that received the 401, then refresh once.
+                if (error.upstreamStatus === 401 && !recovered.has(credential.accountId)) {
+                    recovered.add(credential.accountId);
+                    const expired = await sql`update fixes_provider_accounts set status='needs_admin',last_error_code='SESSION_EXPIRED',
+ expires_at=least(expires_at,now()),updated_at=now() where account_id=${credential.accountId}::uuid and xmin::text=${credential.version} returning account_id`;
+                    if (expired.length) {
+                        try {
+                            if (await refreshProviderSession(sql, env, credential.accountId, true)) {
+                                attempted.splice(attempted.indexOf(credential.accountId), 1);
+                                console.info('fixes_account_auth_recovered', { accountId: credential.accountId });
+                                continue;
+                            }
+                        } catch (refreshError) {
+                            if (!(refreshError instanceof FixesFailure)) throw refreshError;
+                            // Permanent rejection and temporary cooldown are persisted by refresh.
+                        }
+                    }
+                    console.warn('fixes_account_rotating', { accountId: credential.accountId, code: error.code, upstreamStatus: error.upstreamStatus, attempt: attempt + 1 });
+                    continue;
+                }
+                await sql`update fixes_provider_accounts set status='needs_admin',last_error_code='PROVIDER_AUTH',updated_at=now()
+ where account_id=${credential.accountId}::uuid and xmin::text=${credential.version}`;
+            } else {
+                await sql`update fixes_provider_accounts set blocked_until=greatest(blocked_until,((now() at time zone 'Asia/Jakarta')::date+1)::timestamp at time zone 'Asia/Jakarta'),last_error_code='PROVIDER_LIMIT',updated_at=now()
+ where account_id=${credential.accountId}::uuid`;
+            }
+            console.warn('fixes_account_rotating', { accountId: credential.accountId, code: error.code, upstreamStatus: error.upstreamStatus, attempt: attempt + 1 });
+        }
+    }
+    throw lastFailure ?? new FixesFailure('PROVIDER_UNAVAILABLE');
 }
 export function validateDownloadHosts(value: unknown): string[] {
     if (!Array.isArray(value) || value.length > 100 || value.some(h => typeof h !== 'string' || h.length > 253 || !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z][a-z0-9-]*$/i.test(h) || h.toLowerCase() === 'localhost' || h.toLowerCase().endsWith('.localhost')))
@@ -455,25 +532,13 @@ async function requestPackageLink(sql: Sql, env: Env, fixId: string, slot: Slot)
         url.searchParams.set('auth_code', env.RYUU_AUTH_CODE);
         return { url: url.toString() };
     }
-    const credential = await providerAccessToken(sql, env);
-    let data: {
-        url?: string;
-    };
-    try {
-        data = (await jsonFetch(`${API}/api/denuvo/download?fix=${encodeURIComponent(fixId)}&slot=${slot}`, {
+    return withProviderAccount(sql, env, async (credential) => {
+        return (await jsonFetch(`${API}/api/denuvo/download?fix=${encodeURIComponent(fixId)}&slot=${slot}`, {
             Authorization: `Bearer ${credential.token}`,
         })) as {
             url?: string;
         };
-    }
-    catch (e) {
-        if (e instanceof FixesFailure && e.code === 'PROVIDER_AUTH')
-            await sql `update fixes_provider_accounts set status='needs_admin',last_error_code='PROVIDER_AUTH',updated_at=now() where account_id=${credential.accountId}::uuid and xmin::text=${credential.version}`;
-        if (e instanceof FixesFailure && e.code === 'PROVIDER_LIMIT')
-            await sql `update fixes_provider_accounts set blocked_until=((now() at time zone 'Asia/Jakarta')::date+1)::timestamp at time zone 'Asia/Jakarta',last_error_code='PROVIDER_LIMIT',updated_at=now() where account_id=${credential.accountId}::uuid`;
-        throw e;
-    }
-    return data;
+    });
 }
 export async function fetchFixPackage(sql: Sql, env: Env, fixId: string, slot: Slot): Promise<Response> {
     const data = await requestPackageLink(sql, env, fixId, slot);

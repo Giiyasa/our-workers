@@ -9,8 +9,10 @@
  *
  * TIDAK ADA subrequest Steam lagi — versi sebelumnya mem-fetch appdetails Steam
  * per game untuk `header_image`; itu dihapus ("hapus aja fungsinya"). Satu
- * permintaan = dua query Postgres (count + halaman), tanpa jaringan keluar.
- * `game_asset` tidak dilibatkan lagi di rute ini.
+ * permintaan normal = query Postgres (count + halaman). Jika pencarian
+ * tidak memiliki hasil lokal, cari maksimal 8 hasil Steam Store lalu
+ * simpan AppID baru ke game_lists sebelum mengembalikan hasil.
+ * Asset dipakai hanya untuk memilih AppID pada pasangan duplikat terverifikasi.
  *
  * Parameter query:
  *   ?page=1              halaman ke-N (mulai dari 1, maks 10 000)
@@ -39,7 +41,8 @@
  */
 
 import { COUNT_BUDGET_MS, DEFAULT_PAGE_SIZE, MAX_FILTER_LENGTH, MAX_FILTER_VALUES, MAX_PAGE, MAX_PAGE_SIZE, MAX_SEARCH_LENGTH, SEARCH_USE_NORMALIZED_KEY, TABLE_ASSET, TABLE_GAME, WORD_SIMILARITY_MIN } from '../config';
-import { json } from '../lib/http';
+import { fail, json } from '../lib/http';
+import { searchSteamGames, saveSteamSearchGames, SteamSearchFailure } from '../lib/steam-search';
 import { hasLevenshtein } from '../lib/fuzzy';
 import { escapeLike, readInt, readList } from '../lib/params';
 import { normalizeSearchKey } from '../lib/search';
@@ -199,12 +202,35 @@ export const gamesListRoute: DbRoute<ListInput> = {
 		const visible = sql`(g.app_id not in ${sql(duplicateIds)} or g.app_id in (${winner}))`;
 		const visibleWhere = conditions.length > 0 ? sql`${where} and ${visible}` : sql`where ${visible}`;
 
+        const steamFallback = async () => {
+            let saved;
+            try { saved = await saveSteamSearchGames(sql, await searchSteamGames(search)); }
+            catch (error) {
+                if (error instanceof SteamSearchFailure) return fail(502, 'Pencarian Steam sementara tidak tersedia. Coba lagi nanti.', 'STEAM_SEARCH_UNAVAILABLE');
+                const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+                console.error('steam_search_catalog_save_failed', { code: /^[A-Z0-9_]{1,40}$/.test(code) ? code : 'DATABASE_ERROR' });
+                return fail(503, 'Hasil Steam belum berhasil disimpan ke katalog. Coba lagi nanti.', 'STEAM_CATALOG_SAVE_FAILED');
+            }
+            const matches = saved.filter(row => {
+                const game = shapeGame(row);
+                return (!genres.length || genres.some(genre => game.genre.includes(genre))) &&
+                    (!categories.length || categories.some(category => game.categories.includes(category)));
+            });
+            const total = matches.length, totalPages = Math.max(1, Math.ceil(total / pageSize));
+            if (countOnly) return json({ ok: true, total, total_approximate: false, page_size: pageSize, total_pages: totalPages, search_source: 'steam' });
+            const offset = (page - 1) * pageSize, data = matches.slice(offset, offset + pageSize).map(shapeGame);
+            return json({ ok: true, count: data.length, page, page_size: pageSize, total,
+                total_approximate: false, total_pages: totalPages, has_more: offset + pageSize < total,
+                search, search_source: 'steam', filters: { genre: genres, category: categories, tag_warning: tagWarning }, data });
+        };
+
 		// Count once per filter independently of page fetching. No sort/window
 		// or page cap: the desktop can load cards first, then the exact total.
 		if (countOnly) {
 			const result = await sql`select count(*)::int as total from ${sql(TABLE_GAME)} g ${visibleWhere}`;
 			const total = Number(result[0]?.total);
 			if (!Number.isSafeInteger(total) || total < 0) throw new Error('Catalog count unavailable');
+            if (search && total === 0) return steamFallback();
 			return json({ ok: true, total, total_approximate: false, page_size: pageSize,
 				total_pages: Math.max(1, Math.ceil(total / pageSize)) });
 		}
@@ -306,6 +332,11 @@ export const gamesListRoute: DbRoute<ListInput> = {
 			countPromise,
 			new Promise<null>((resolve) => setTimeout(() => resolve(null), COUNT_BUDGET_MS)),
 		]);
+        if (search && rows.length === 0) {
+            // An out-of-range page is not a missing game. Check the full filter first.
+            const existing = await sql`select g.app_id from ${sql(TABLE_GAME)} g ${visibleWhere} limit 1`;
+            if (!existing.length) return steamFallback();
+        }
 		const hasMore = rows.length > pageSize;
 		const pageRows = hasMore ? rows.slice(0, pageSize) : rows;
 		// A capped search count cannot be the exact total while lookahead

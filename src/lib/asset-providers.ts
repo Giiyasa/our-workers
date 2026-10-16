@@ -1,6 +1,6 @@
 import type { Sql } from "./db";
 import { MAX_LUA_BYTES } from "../config";
-import { providerAccessToken, FixesFailure } from "./fixes-provider";
+import { withProviderAccount, FixesFailure } from "./fixes-provider";
 import { extractLuaZip } from "./lua-archive";
 
 export class AssetFailure extends Error {
@@ -196,17 +196,18 @@ export async function readLuaToolsPackage(response: Response, gameId: number): P
 }
 async function luaTools(sql: Sql, env: Env, gameId: number): Promise<Uint8Array | null> {
     try {
-        const credential=await providerAccessToken(sql,env);
+        return await withProviderAccount(sql,env,async (credential) => {
         const url=new URL("https://lua.tools/api/manifest/download");
         url.searchParams.set("appid",String(gameId));url.searchParams.set("source","Luie");
         const response=await providerRequest("luatools","lua",url,{headers:{Authorization:`Bearer ${credential.token}`},signal:AbortSignal.timeout(20000)});
         if(!response.ok) {
             await response.body?.cancel();
-            if([401,403].includes(response.status))await sql`update fixes_provider_accounts set status='needs_admin',last_error_code='PROVIDER_AUTH',updated_at=now() where account_id=${credential.accountId}::uuid and xmin::text=${credential.version}`;
-            if(response.status===429)await sql`update fixes_provider_accounts set blocked_until=((now() at time zone 'Asia/Jakarta')::date+1)::timestamp at time zone 'Asia/Jakarta',last_error_code='PROVIDER_LIMIT',updated_at=now() where account_id=${credential.accountId}::uuid`;
+            if([401,403].includes(response.status))throw new FixesFailure('PROVIDER_AUTH',response.status);
+            if(response.status===429)throw new FixesFailure('PROVIDER_LIMIT',response.status);
             console.warn("luatools_lua_fallback",{status:response.status});return null;
         }
         return await readLuaToolsPackage(response,gameId);
+        });
     } catch(error) {
         console.warn("luatools_lua_fallback",{code:error instanceof FixesFailure || error instanceof AssetFailure?error.code:"PROVIDER_UNAVAILABLE"});
         return null;
