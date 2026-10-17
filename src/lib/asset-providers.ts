@@ -204,13 +204,26 @@ async function luaTools(sql: Sql, env: Env, gameId: number): Promise<Uint8Array 
             await response.body?.cancel();
             if([401,403].includes(response.status))throw new FixesFailure('PROVIDER_AUTH',response.status);
             if(response.status===429)throw new FixesFailure('PROVIDER_LIMIT',response.status);
-            console.warn("luatools_lua_fallback",{status:response.status});return null;
+            if(response.status===404)return null;
+            throw new AssetFailure("LUIE_HTTP_ERROR",`Download Luie gagal (HTTP ${response.status}).`);
         }
         return await readLuaToolsPackage(response,gameId);
         });
     } catch(error) {
         console.warn("luatools_lua_fallback",{code:error instanceof FixesFailure || error instanceof AssetFailure?error.code:"PROVIDER_UNAVAILABLE"});
-        return null;
+        if(error instanceof FixesFailure) {
+            const message = error.code === 'PROVIDER_AUTH' ? 'Akses akun LuaTools ditolak. Login ulang akun provider di admin.'
+                : error.code === 'PROVIDER_LIMIT' ? 'Kuota akun LuaTools yang dicoba sedang dibatasi.'
+                : error.code === 'PROVIDER_UNAVAILABLE' ? 'Tidak ada akun LuaTools yang siap; periksa sesi, kuota, dan blokir akun di admin.'
+                : ['SESSION_CONFIG','SESSION_DECRYPT'].includes(error.code) ? 'Konfigurasi atau enkripsi sesi akun LuaTools bermasalah.'
+                : 'Sesi akun LuaTools gagal dipulihkan. Periksa akun provider di admin.';
+            throw new AssetFailure(`LUIE_${error.code}`, message);
+        }
+        if(error instanceof AssetFailure) {
+            throw new AssetFailure(error.code.startsWith('LUIE_') ? error.code : `LUIE_${error.code}`,
+                error.code === 'PROVIDER_BAD_FILE' ? 'Paket Luie diterima, tetapi file Lua atau AppID di dalamnya tidak valid.' : error.message);
+        }
+        throw new AssetFailure('LUIE_UNAVAILABLE','Download Luie gagal diproses. Periksa log Worker.');
     }
 }
 
@@ -225,9 +238,23 @@ export async function fetchProviderLua(sql: Sql, env: Env, gameId: number): Prom
 		return { bytes: await readLua(response), source: "provider_2" };
 	}
 	await response.body?.cancel();
-	const luatools = await luaTools(sql, env, gameId);
+	let luatools: Uint8Array | null = null;
+	let luieFailure: AssetFailure | undefined;
+	try { luatools = await luaTools(sql, env, gameId); }
+	catch (error) {
+		if (!(error instanceof AssetFailure)) throw error;
+		luieFailure = error;
+	}
 	if (luatools) return { bytes: luatools, source: "luatools_luie" };
-	const bytes = await hubcap(sql, env, gameId);
+	let bytes: Uint8Array | null;
+	try { bytes = await hubcap(sql, env, gameId); }
+	catch (error) {
+		if (!(error instanceof AssetFailure)) throw error;
+		console.warn('asset_fallback_failed', { appId: gameId, luieCode: luieFailure?.code ?? 'NOT_FOUND', hubcapCode: error.code });
+		if (luieFailure) throw new AssetFailure(luieFailure.code, `${luieFailure.message} Fallback Hubcap juga tidak tersedia.`, luieFailure.retrySeconds);
+		throw error;
+	}
+	if (!bytes && luieFailure) throw luieFailure;
 	if (!bytes) throw new AssetFailure("ASSET_NOT_FOUND", "Asset game belum tersedia pada semua provider.", 3600);
 	return { bytes, source: "provider_3" };
 }

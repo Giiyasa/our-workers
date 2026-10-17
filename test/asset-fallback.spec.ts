@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { encryptAsset, decryptAsset } from "../src/lib/asset-crypto";
 import { fetchProviderLua, readLua, readLuaToolsPackage } from "../src/lib/asset-providers";
-import { providerAccessToken, withProviderAccount } from "../src/lib/fixes-provider";
+import { providerAccessToken, withProviderAccount, FixesFailure } from "../src/lib/fixes-provider";
 import { deflateRawSync } from "node:zlib";
 import { luaZipCrc } from "../src/lib/lua-archive";
 import type { Sql } from "../src/lib/db";
@@ -55,9 +55,9 @@ describe("provider ordering", () => {
 		await expect(fetchProviderLua({} as Sql, env, 620)).rejects.toMatchObject({ code: "PROVIDER_UNAVAILABLE" });
 		expect(fetcher).toHaveBeenCalledTimes(1);
 	});
-	it("only a Ryuu 404 reaches LuaTools then Hubcap; missing Hubcap credentials remain configuration errors", async () => {
+	it("preserves the LuaTools failure when Hubcap is also unconfigured", async () => {
 		vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response('{"error":"Game not found"}', { status: 404 })));
-		await expect(fetchProviderLua({} as Sql, env, 620)).rejects.toMatchObject({ code: "PROVIDER_CONFIG" });
+		await expect(fetchProviderLua({} as Sql, env, 620)).rejects.toMatchObject({ code: "LUIE_UNAVAILABLE" });
 	});
 });
 
@@ -77,6 +77,26 @@ function zip(entries: {name:string; text:string; method?:number}[]): Uint8Array 
     return Buffer.concat([...locals,directory,end]);
 }
 describe("LuaTools fourth source",()=>{
+    it.each([
+        [401, 'LUIE_PROVIDER_AUTH'],
+        [403, 'LUIE_PROVIDER_AUTH'],
+        [429, 'LUIE_PROVIDER_LIMIT'],
+        [503, 'LUIE_HTTP_ERROR'],
+    ])("keeps the Luie HTTP %s failure visible when Hubcap fails",async(status,code)=>{
+        vi.mocked(providerAccessToken).mockResolvedValue({token:"synthetic",accountId:"fixture",version:"1"});
+        vi.stubGlobal("fetch",vi.fn(async(raw:string|URL)=>new Response(null,{status:new URL(raw).hostname==='generator.ryuu.lol'?404:status})));
+        await expect(fetchProviderLua({} as Sql,env,620)).rejects.toMatchObject({code,message:expect.stringContaining('Hubcap')});
+    });
+    it("reports an unavailable LuaTools account pool separately from Hubcap quota",async()=>{
+        vi.mocked(providerAccessToken).mockRejectedValue(new FixesFailure('PROVIDER_UNAVAILABLE'));
+        vi.stubGlobal("fetch",vi.fn(async()=>new Response(null,{status:404})));
+        await expect(fetchProviderLua({} as Sql,env,620)).rejects.toMatchObject({code:'LUIE_PROVIDER_UNAVAILABLE',message:expect.stringContaining('Tidak ada akun LuaTools yang siap')});
+    });
+    it("preserves invalid Luie package errors",async()=>{
+        vi.mocked(providerAccessToken).mockResolvedValue({token:"synthetic",accountId:"fixture",version:"1"});
+        vi.stubGlobal("fetch",vi.fn(async(raw:string|URL)=>new URL(raw).hostname==='generator.ryuu.lol'?new Response(null,{status:404}):new Response('<html>error</html>')));
+        await expect(fetchProviderLua({} as Sql,env,620)).rejects.toMatchObject({code:'LUIE_PROVIDER_BAD_FILE'});
+    });
     it("runs after Ryuu 404 and before Hubcap with the existing provider account",async()=>{
         vi.mocked(providerAccessToken).mockResolvedValue({token:"synthetic-luatools",accountId:"fixture",version:"1"});
         const fetcher=vi.fn(async(raw:string|URL)=>new URL(raw).hostname==="generator.ryuu.lol"?new Response(null,{status:404}):new Response(zip([{name:"620.lua",text:lua},{name:"manifest/123.manifest",text:"ignored"}])));
