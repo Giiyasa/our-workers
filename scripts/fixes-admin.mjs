@@ -87,22 +87,10 @@ async function login() {
 	});
 	try {
 		const code = await codePromise;
-		const response = await fetch(`${FIXES_CONFIG.auth}/token?grant_type=pkce`, {
-			method: 'POST',
-			redirect: 'error',
-			headers: { apikey: FIXES_CONFIG.anonKey, 'Content-Type': 'application/json' },
-			body: JSON.stringify({ auth_code: code, code_verifier: verifier }),
-			signal: AbortSignal.timeout(30_000),
-		});
-		if (!response.ok) throw new Error(`Provider exchange failed: HTTP ${response.status}.`);
-		const session = await response.json();
-		if (!session.access_token || !session.refresh_token || !Number.isFinite(Number(session.expires_in)) || Number(session.expires_in) <= 0)
-			throw new Error('Invalid provider session response.');
-		const stored = await admin('session', {
+		const stored = await admin('login', {
  label: process.argv.slice(3).find(a=>!a.startsWith('--')) ?? '',
-			access_token: session.access_token,
-			refresh_token: session.refresh_token,
-			expires_at: new Date(Date.now() + Number(session.expires_in) * 1000).toISOString(),
+			auth_code: code,
+			code_verifier: verifier,
 		});
 		console.log('Provider session stored encrypted in DB. Account ID:', stored.account_id);
 	} finally {

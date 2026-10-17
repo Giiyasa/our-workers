@@ -48,7 +48,7 @@ try{
  const reserve=providerQueries.find(q=>q.includes('insert into fixes_provider_usage'));
  assert.ok(pick&&reserve);
  const first='aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',second='bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee';
- const limits={'FIXES_CONFIG.dailyLimit':24};
+ const limits={'FIXES_CONFIG.dailyLimit':24,excludedAccountIds:[],reserveDownload:true};
  await db.query("insert into fixes_provider_accounts(account_id,label,session_encrypted,expires_at)values($1,'First',decode('01','hex'),now()+interval '1 hour'),($2,'Second',decode('02','hex'),now()+interval '1 hour')",[first,second]);
  for(let i=0;i<48;i++) {
   await db.exec('BEGIN');
@@ -73,6 +73,31 @@ try{
  await db.query("update fixes_provider_accounts set status='ready',expires_at=now()-interval '1 second',blocked_until=null where account_id=$1",[second]);
  assert.equal((await template(pick,limits)).rows.length,0,'expired accounts unavailable');
  const privateAccounts=await db.query("select has_table_privilege('anon','fixes_provider_accounts','SELECT') as allowed");assert.equal(privateAccounts.rows[0].allowed,false);
+ // Actual cron SQL: refresh near-expiry sessions independently of quota/blocking,
+ // then recheck the same predicate under the row lock before rotating tokens.
+ const due=providerQueries.find(q=>q.includes('select account_id::text from fixes_provider_accounts'));
+ const keepaliveLock=providerQueries.find(q=>q.includes('select encode(session_encrypted')&&q.includes("interval '10 minutes'"));
+ assert.ok(due&&keepaliveLock);
+ const nearExpiry={periodic:false,'!periodic':true},periodic={periodic:true,'!periodic':false};
+ await db.query("update fixes_provider_accounts set status='ready',last_error_code=null,expires_at=now()+interval '8 minutes',blocked_until=now()+interval '1 day' where account_id=$1",[first]);
+ await db.query("update fixes_provider_accounts set status='disabled',expires_at=now()-interval '1 hour' where account_id=$1",[second]);
+ assert.deepEqual((await template(due,nearExpiry)).rows.map(r=>r.account_id),[first],'quota-blocked account refreshes while disabled account stays excluded');
+ assert.equal((await template(keepaliveLock,{...nearExpiry,id:first})).rows.length,1);
+ await db.query("update fixes_provider_accounts set expires_at=now()+interval '1 hour' where account_id=$1",[first]);
+ assert.equal((await template(keepaliveLock,{...nearExpiry,id:first})).rows.length,0,'a concurrent refresh makes cron skip this row');
+ await db.query("update fixes_provider_accounts set updated_at=now()-interval '2 minutes' where account_id=$1",[first]);
+ assert.equal((await template(due,periodic)).rows.length,1,'six-hour refresh includes unexpired sessions');
+ assert.equal((await template(keepaliveLock,{...periodic,id:first})).rows.length,1);
+ await db.query("update fixes_provider_accounts set updated_at=now() where account_id=$1",[first]);
+ assert.equal((await template(keepaliveLock,{...periodic,id:first})).rows.length,0,'six-hour cron skips sessions just rotated by another job');
+ await db.query("update fixes_provider_accounts set status='needs_admin',last_error_code='REFRESH_REJECTED',expires_at=now()-interval '1 hour' where account_id=$1",[first]);
+ assert.equal((await template(due,nearExpiry)).rows.length,0,'revoked refresh tokens require a new login');
+ await db.query("update fixes_provider_accounts set status='needs_admin',last_error_code='SESSION_EXPIRED' where account_id=$1",[first]);
+ assert.equal((await template(due,nearExpiry)).rows.length,1,'expired but recoverable sessions stay eligible');
+ await db.query("update fixes_provider_accounts set status='ready',last_error_code='PROVIDER_HTTP',updated_at=now() where account_id=$1",[first]);
+ assert.equal((await template(due,nearExpiry)).rows.length,0,'temporary refresh failures observe the cooldown');
+ await db.query("update fixes_provider_accounts set updated_at=now()-interval '2 minutes' where account_id=$1",[first]);
+ assert.equal((await template(due,nearExpiry)).rows.length,1,'temporary refresh failures become eligible after the cooldown');
  const audit=providerQueries.find(q=>q.includes('insert into fixes_provider_config'));assert.ok(audit);
  await db.exec("update fixes_provider_config set download_hosts='[]'");
  await template(audit,{"sql.json([url.hostname])":['new-cdn.test'],'url.hostname':'new-cdn.test'});

@@ -59,6 +59,7 @@ import { curatedRoute, homeSyncRoute } from "./routes/curated";
 import { consumeAssetJob, type AssetMessage } from "./lib/asset-jobs";
 import { consumeFixesJob, type FixesMessage } from "./lib/fixes-jobs";
 import { fixesRoutes } from "./routes/fixes";
+import { fixesAdminLoginRoute } from './routes/fixes-login';
 
 /**
  * TABEL RUTE — satu-satunya daftar rute.
@@ -93,6 +94,7 @@ const ROUTES: RouteDef[] = [
 	curatedRoute,
 	homeSyncRoute,
 	...fixesRoutes,
+	fixesAdminLoginRoute,
 	// --- account: satu GET untuk halaman Account FE (profil + owned + history)
 	accountRoute,
 ];
@@ -116,11 +118,11 @@ function matchRoute(
 	return match.slice(1);
 }
 
-import { syncHomeFeed } from './lib/home-feed';
+import { runScheduledTask } from './lib/scheduled';
 export default {
- async scheduled(_event: ScheduledController, env: Env): Promise<void> {
+ async scheduled(event: ScheduledController, env: Env): Promise<void> {
   const sql = createDb(env);
-  try { await syncHomeFeed(sql,new Date(),(env as Env & {STEAM_API_KEY?:string}).STEAM_API_KEY); } finally { await sql.end({timeout:5}); }
+  try { await runScheduledTask(event.cron, sql, env); } finally { await sql.end({timeout:5}); }
  },
 	async queue(batch: MessageBatch<AssetMessage | FixesMessage>, env: Env): Promise<void> {
 		for (const message of batch.messages) {

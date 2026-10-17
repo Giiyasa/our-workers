@@ -279,13 +279,21 @@ export async function saveProviderSession(sql: Sql, env: Env, input: {
     // Deliberately preserve usage and blocked_until across login and refresh.
     return id;
 }
-export async function refreshProviderSession(sql: Sql, env: Env, id: string, automatic = false): Promise<boolean> {
+export async function refreshProviderSession(sql: Sql, env: Env, id: string, automatic: boolean | 'scheduled' | 'periodic' = false): Promise<boolean> {
     accountId(id);
     if (!/^[a-f\d]{64}$/i.test(env.FIXES_SESSION_KEY_HEX ?? '')) throw new FixesFailure('SESSION_CONFIG');
     let upstreamStatus: number | undefined;
     const result = await sql.begin(async (tx) => {
         // Recheck under the lock: another queue job may have already rotated the token.
-        const rows = automatic
+        const periodic = automatic === 'periodic';
+        const rows = automatic === 'scheduled' || periodic
+            ? await tx `select encode(session_encrypted,'hex') as encrypted from fixes_provider_accounts
+ where account_id=${id}::uuid and (status='ready' or (status='needs_admin' and last_error_code='SESSION_EXPIRED'))
+ and (${periodic} or expires_at<=now()+interval '10 minutes')
+ and (${!periodic} or updated_at<=now()-interval '60 seconds')
+ and (coalesce(last_error_code,'') not in ('PROVIDER_NETWORK','PROVIDER_HTTP','REFRESH_FORMAT') or updated_at<=now()-interval '60 seconds')
+ for update skip locked`
+            : automatic
             ? await tx `select encode(session_encrypted,'hex') as encrypted from fixes_provider_accounts
  where account_id=${id}::uuid and (status='ready' or (status='needs_admin' and last_error_code='SESSION_EXPIRED'))
  and expires_at<=now()+interval '30 seconds' for update skip locked`
@@ -340,6 +348,36 @@ export async function refreshProviderSession(sql: Sql, env: Env, id: string, aut
     }
     console.info('fixes_session_refresh_completed', { accountId: id, automatic, outcome: upstreamStatus === undefined ? 'skipped' : 'refreshed' });
     return upstreamStatus !== undefined;
+}
+
+/** Keep enabled sessions alive even when download quota is exhausted or blocked. */
+export async function refreshDueProviderSessions(sql: Sql, env: Env, periodic = false) {
+    if (!/^[a-f\d]{64}$/i.test(env.FIXES_SESSION_KEY_HEX ?? '')) throw new FixesFailure('SESSION_CONFIG');
+    // Lock/recheck happens inside refreshProviderSession. Overlapping cron/download
+    // jobs skip locked rows and always consume the latest rotated refresh token.
+    const accounts = await sql `select account_id::text from fixes_provider_accounts
+ where (status='ready' or (status='needs_admin' and last_error_code='SESSION_EXPIRED'))
+ and (${periodic} or expires_at<=now()+interval '10 minutes')
+ and (${!periodic} or updated_at<=now()-interval '60 seconds')
+ and (coalesce(last_error_code,'') not in ('PROVIDER_NETWORK','PROVIDER_HTTP','REFRESH_FORMAT') or updated_at<=now()-interval '60 seconds')
+ order by expires_at,account_id limit 20`;
+    const summary = { checked: accounts.length, refreshed: 0, skipped: 0, failed: 0 };
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(3, accounts.length) }, async () => {
+        while (next < accounts.length) {
+            const account = accounts[next++];
+            try {
+                if (await refreshProviderSession(sql, env, account.account_id, periodic ? 'periodic' : 'scheduled')) summary.refreshed++;
+                else summary.skipped++;
+            } catch (error) {
+                summary.failed++;
+                console.warn('fixes_session_keepalive_account_failed', { accountId: account.account_id,
+                    code: error instanceof FixesFailure ? error.code : 'REFRESH_FAILED' });
+            }
+        }
+    }));
+    console.info('fixes_session_keepalive_completed', { ...summary, mode: periodic ? 'periodic' : 'near_expiry' });
+    return summary;
 }
 // Downloads reserve one upstream attempt atomically; failed attempts remain counted.
 // Metadata reads can request a session without consuming download capacity.

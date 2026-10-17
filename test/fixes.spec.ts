@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { SELF } from 'cloudflare:test';
 import worker from "../src/index";
-import { syncListings, allowedDownloadUrl, isPublicDownloadAddress, digest, fetchFixPackage, providerAccessToken, withProviderAccount, FixesFailure, saveProviderSession, refreshProviderSession, validateDownloadHosts, validateFix } from '../src/lib/fixes-provider';
+import { syncListings, allowedDownloadUrl, isPublicDownloadAddress, digest, fetchFixPackage, providerAccessToken, withProviderAccount, FixesFailure, saveProviderSession, refreshProviderSession, refreshDueProviderSessions, validateDownloadHosts, validateFix } from '../src/lib/fixes-provider';
 import { packageObjectKey, storePackage } from '../src/lib/fixes-storage';
 import { fixesDetailRoute, fixesAdminSyncRoute, fixesListRoute, fixesPrepareRoute, fixesDownloadRoute } from '../src/routes/fixes';
 import { encryptAsset } from '../src/lib/asset-crypto';
@@ -73,6 +73,10 @@ describe('Fixes HTTP gates', () => {
     it('admin refresh cannot be invoked with an ordinary application session', async () => {
         const res = await SELF.fetch('https://worker.test/api/admin/fixes/refresh', { method: 'POST', headers: SESSION });
         expect(res.status).toBe(401);
+    });
+    it('server-side provider login requires the admin write token', async () => {
+        expect((await SELF.fetch('https://worker.test/api/admin/fixes/login', { method:'POST', headers:SESSION })).status).toBe(401);
+        expect((await SELF.fetch('https://worker.test/api/admin/fixes/login', { method:'POST', headers:{'x-write-token':'token-uji','content-type':'application/json'},body:JSON.stringify({auth_code:'code',code_verifier:'short'}) })).status).toBe(400);
     });
 });
 describe('provider credentials and hosts', () => {
@@ -347,6 +351,31 @@ describe('multiaccount provider controls', () => {
     it('skips automatic rotation when another job already refreshed or locked the account', async () => {
         const fetcher=vi.fn(); vi.stubGlobal('fetch',fetcher);
         await refreshProviderSession(sqlMock(()=>[]),env,token,true);
+        expect(fetcher).not.toHaveBeenCalled();
+    });
+    it('keeps quota-blocked sessions alive and isolates a revoked account from other accounts', async () => {
+        const row=await sessionRow(),other='bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+        const queries:string[]=[];
+        const fetcher=vi.fn(async()=>fetcher.mock.calls.length===1?new Response(null,{status:400}):Response.json({access_token:'renewed-token',refresh_token:'rotated-refresh',expires_in:3600}));
+        vi.stubGlobal('fetch',fetcher);
+        const summary=await refreshDueProviderSessions(sqlMock(q=>{
+            queries.push(q);
+            if(q.includes('select account_id::text'))return [{account_id:token},{account_id:other}];
+            if(q.includes('select encode(session_encrypted'))return [row];
+            return [];
+        }),env);
+        expect(summary).toEqual({checked:2,refreshed:1,failed:1,skipped:0});
+        expect(fetcher).toHaveBeenCalledTimes(2);
+        expect(queries.find(q=>q.includes('select account_id::text'))).not.toContain('blocked_until');
+        expect(queries.every(q=>!q.includes('fixes_provider_usage')&&!q.includes('blocked_until=null'))).toBe(true);
+        const locks=queries.filter(q=>q.includes('select encode(session_encrypted'));
+        expect(locks.every(q=>q.includes("interval '10 minutes'")&&q.includes('skip locked'))).toBe(true);
+        expect(queries.some(q=>q.includes("last_error_code='REFRESH_REJECTED'"))).toBe(true);
+    });
+    it('cron rechecks eligibility under lock and skips accounts refreshed by another job',async()=>{
+        const fetcher=vi.fn();vi.stubGlobal('fetch',fetcher);
+        const summary=await refreshDueProviderSessions(sqlMock(q=>q.includes('select account_id::text')?[{account_id:token}]:[]),env);
+        expect(summary).toEqual({checked:1,refreshed:0,skipped:1,failed:0});
         expect(fetcher).not.toHaveBeenCalled();
     });
     it('temporary refresh HTTP failure does not invalidate the account', async () => {

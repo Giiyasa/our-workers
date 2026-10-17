@@ -56,6 +56,30 @@ Tabel tambahan: `fixes_catalog`, `fixes_entries`, `fixes_package_jobs`, `fixes_p
 
 Sesi provider mendukung banyak akun, masing-masing terenkripsi AES-256-GCM dengan secret `FIXES_SESSION_KEY_HEX`. Login diverifikasi melalui provider `/auth/v1/user`; account ID adalah ID asli provider. Login ulang dan refresh akun yang sama tidak mereset kuota atau blok rate limit. Legacy singleton tetap tersimpan di tabel lama untuk recovery/audit, tetapi tidak dipakai oleh pool. Login ulang mendaftarkan identitas provider terverifikasi; tabel lama tidak dihapus.
 
+## Sesi dikelola Worker dan refresh terjadwal
+
+Selain pemeriksaan mendekati kedaluwarsa tiap lima menit, cron `0 5,11,17,23 * * *` melakukan refresh berkala setiap enam jam: **00.00, 06.00, 12.00, dan 18.00 WIB**. Jadwal Cloudflare ditulis dalam UTC. Mode ini juga menyertakan token yang belum mendekati kedaluwarsa, tetap mengikuti status akun/cooldown dan tidak mereset kuota. Akun yang baru diubah atau di-refresh dalam 60 detik terakhir dilewati untuk mengurangi refresh ganda saat dua cron bertemu. Log ringkasan membedakan `mode=periodic` dan `mode=near_expiry`.
+
+Login tetap membutuhkan persetujuan Discord/LuaTools melalui browser. CLI menggunakan callback lokal yang sudah dikonfigurasi (`http://localhost:53789/callback`), lalu mengirim hanya authorization code dan PKCE verifier ke `POST /api/admin/fixes/login` dengan WRITE_TOKEN. Cloudflare Worker menukar kode ke token, memverifikasi identitas, dan menyimpan pasangan access/refresh token terenkripsi. Token provider tidak dikembalikan ke CLI atau disimpan sebagai sesi browser oleh CLI. Callback HTTPS langsung di domain Worker belum digunakan karena harus diizinkan pada konfigurasi redirect LuaTools terlebih dahulu.
+
+Cron `*/5 * * * *` berjalan sepanjang hari dan memperbarui sesi aktif yang berakhir dalam 10 menit. Pemeriksaan dilakukan lagi di bawah row lock yang sama dengan refresh saat download; job bersamaan melewati akun yang sedang dikunci dan memakai token terbaru dari database. Setiap eksekusi memproses maksimal 20 akun, dengan tiga refresh bersamaan. Home Feed tetap memakai cron `0 */12 * * *` sendiri, sehingga tidak ikut berjalan setiap lima menit.
+
+Refresh terjadwal tetap menjaga sesi akun yang kuota download-nya habis atau diblokir karena rate limit; refresh tidak memakai atau mereset kuota. Akun disabled, sesi yang tidak bisa didekripsi, dan refresh token yang ditolak permanen tidak dicoba terus-menerus. Gangguan jaringan/HTTP sementara memiliki cooldown minimal 60 detik dan dicoba lagi oleh cron berikutnya. Logout global/revokasi provider tidak bisa dipulihkan oleh cron: login ulang akun tersebut. Login ulang memakai identitas akun yang sama dan mempertahankan counter/blokir download.
+
+Tidak membutuhkan SQL atau secret baru jika multiaccount dan `FIXES_SESSION_KEY_HEX` sudah terpasang. Sesi existing yang masih sah otomatis ikut dijaga setelah deploy. Jalankan dari repo Worker:
+
+```powershell
+Set-Location G:\STEAM_PROJECT\our-workers
+npx wrangler deploy
+# Hanya bila akun perlu login ulang; ganti label jika menambah akun lain.
+node scripts/fixes-admin.mjs login "Worker account" --open
+node scripts/fixes-admin.mjs status
+# Untuk memantau cron dan refresh di server:
+npx wrangler tail
+```
+
+Login selesai ketika terminal menampilkan `Provider session stored encrypted in DB`. Setelah itu terminal/browser boleh ditutup. Pantau log `fixes_session_keepalive_completed` (checked/refreshed/skipped/failed) dan `fixes_session_keepalive_account_failed` (accountId/code). Status akun dan `last_error_code` terlihat melalui perintah status. Jadwal deploy tidak membuktikan sesi sudah pulih: pastikan log refresh sukses dan lakukan satu download autentikasi untuk verifikasi produksi.
+
 Setiap akun mendapat maksimal **24 permintaan paket upstream per hari WIB**, reset pukul 00.00 Asia/Jakarta. Manifest dan Fix masing-masing menggunakan satu permintaan. Reservasi dilakukan atomik sebelum meminta link, termasuk saat inspeksi `host`; percobaan gagal/tidak pasti tetap dihitung. Kuota ini adalah batas lokal aplikasi, bukan klaim tentang batas server LuaTools. Pemakaian akun yang sama di luar Worker tidak dapat diamati; jika provider menolak dengan 429, akun diblok lokal hingga hari berikutnya. Tidak ada bypass pembatasan provider.
 
 Worker memilih akun ready, belum kedaluwarsa, tidak diblok, dan masih memiliki kuota. Akun terpilih dikunci selama reservasi; counter DB memiliki batas keras 24. Cache R2 tidak menggunakan kuota provider. Batas download Fixes per-user 50/12 jam yang sempat dibuat tidak lagi dipakai; quota/coupon claim existing tetap utuh. Jika semua akun tidak tersedia, user menerima 503 generic, tanpa popup Discord atau logout aplikasi.

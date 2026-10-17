@@ -44,6 +44,7 @@ describe("tabel rute", () => {
    "POST /api/admin/fixes/invalidate",
    "POST /api/admin/fixes/config",
    "POST /api/admin/fixes/account",
+   "POST /api/admin/fixes/login",
 			"GET /api/account",
 		]);
 	});
