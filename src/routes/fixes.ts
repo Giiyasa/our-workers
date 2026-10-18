@@ -7,7 +7,7 @@ import { preflightSession, requireSession, sessionFailStatus } from '../lib/sess
 import type { DbRoute, RouteContext } from '../lib/types';
 import type { Sql } from '../lib/db';
 import { FixesFailure, accountId, validateDownloadHosts, inspectPackageHost, syncListings, syncDetails, saveProviderSession, refreshProviderSession, safeFilename, type Slot, type FixEntry, } from '../lib/fixes-provider';
-import { startFixesJob } from '../lib/fixes-jobs';
+import { jobDiagnostic, startFixesJob } from '../lib/fixes-jobs';
 import { readPackage } from '../lib/fixes-storage';
 const downloadLimited = () => fail(429, "Batas 25 unduhan untuk sesi 12 jam ini sudah tercapai (50 per hari).", "DOWNLOAD_LIMIT");
 const unavailable = () => fail(503, 'Paket sementara belum tersedia. Coba lagi nanti.', 'FIXES_UNAVAILABLE');
@@ -155,6 +155,16 @@ async function job(sql: Sql, input: PackageInput) {
     const rows = await sql `select *,lease_expires_at>now() as live,coalesce(next_retry_at>now(),false) as cooling from fixes_package_jobs where fix_id=${input.fixId} and revision=${input.revision} and slot=${input.slot}`;
     return rows[0];
 }
+function packageUnavailable(ctx: RouteContext, input: PackageInput, operation: 'prepare' | 'download', stage: string,
+    code: string, extra: Record<string, unknown> = {}) {
+    // Keep the existing client error code; expose only bounded machine diagnostics.
+    const errorCode = /^[A-Z0-9_]{1,80}$/.test(code) ? code : 'FIXES_FAILED';
+    console.error(`fixes_${operation}_failed`, { ...extra, code: errorCode, stage,
+        fix_id: input.fixId, revision: input.revision, slot: input.slot,
+        ray_id: ctx.request.headers.get('cf-ray')?.slice(0,80) ?? null });
+    return json({ ok: false, error: 'Paket sementara belum tersedia. Coba lagi nanti.',
+        code: 'FIXES_UNAVAILABLE', error_code: errorCode, stage }, 503);
+}
 export const fixesPrepareRoute: DbRoute<PackageInput> = {
     method: 'POST',
     path: '/api/fixes/prepare',
@@ -171,13 +181,17 @@ export const fixesPrepareRoute: DbRoute<PackageInput> = {
         return input instanceof Response ? input : { input };
     },
     handle: async (ctx, input, sql) => {
+        let stage = 'package_access';
         try {
             const allowed = await packageAccess(ctx, sql, input);
             if (allowed instanceof Response)
                 return allowed;
+            stage = 'download_allowance';
             if (!(await downloadAllowance(sql, allowed.userId))) return downloadLimited();
+            stage = 'job_lookup';
             const current = await job(sql, input);
             if (current?.status === 'ready') {
+                stage = 'cache_head';
                 const head = await readPackage(ctx.env, current.r2_object_key, 'HEAD');
                 await head.body?.cancel();
                 if (head.ok) {
@@ -193,17 +207,19 @@ export const fixesPrepareRoute: DbRoute<PackageInput> = {
                     });
                 }
                 if (head.status !== 404)
-                    return unavailable();
+                    return packageUnavailable(ctx, input, 'prepare', stage, 'STORAGE_HTTP', { upstream_status: head.status, job_status: current.status });
             }
             if (current?.status === 'failed' && current.cooling)
-                return unavailable();
+                return packageUnavailable(ctx, input, 'prepare', 'job_cooldown', current.error_code ?? 'PACKAGE_FAILED',
+                    { job_status: current.status, attempts: Number(current.attempts) || 0 });
+            stage = 'queue_start';
             if (!(current?.status === 'processing' && current.live))
                 await startFixesJob(sql, ctx.env, input.fixId, input.revision, input.slot, allowed.appId, allowed.filename);
             return json({ ok: true, status: 'processing', retry_after_seconds: 3 }, 202);
         }
         catch (error) {
-            console.error('fixes_prepare_failed', { code: error instanceof FixesFailure ? error.code : 'FIXES_FAILED' });
-            return unavailable();
+            const diagnostic = jobDiagnostic(error, stage);
+            return packageUnavailable(ctx, input, 'prepare', stage, diagnostic.code, diagnostic);
         }
     },
 };
@@ -220,18 +236,23 @@ export const fixesDownloadRoute: DbRoute<PackageInput> = {
         return input instanceof Response ? input : { input };
     },
     handle: async (ctx, input, sql) => {
+        let stage = 'package_access';
         try {
             const allowed = await packageAccess(ctx, sql, input);
             if (allowed instanceof Response)
                 return allowed;
+            stage = 'download_allowance';
             if (!(await downloadAllowance(sql, allowed.userId))) return downloadLimited();
+            stage = 'job_lookup';
             const current = await job(sql, input);
             if (current?.status !== 'ready')
-                return unavailable();
+                return packageUnavailable(ctx, input, 'download', 'job_not_ready', current?.error_code ?? 'PACKAGE_NOT_READY',
+                    { job_status: current?.status ?? 'missing' });
+            stage = 'cache_read';
             const source = await readPackage(ctx.env, current.r2_object_key);
             if (!source.ok || !source.body) {
                 await source.body?.cancel();
-                return unavailable();
+                return packageUnavailable(ctx, input, 'download', stage, 'STORAGE_HTTP', { upstream_status: source.status });
             }
             // Cached bytes use the shared user quota, without an upstream request.
             const response = new Response(source.body, {
@@ -244,6 +265,7 @@ export const fixesDownloadRoute: DbRoute<PackageInput> = {
                 },
             });
             try {
+                stage = 'reserve_download';
                 const reserved = await sql.begin(tx => reserveDownload(tx, allowed.userId));
                 if (!reserved) {
                     await source.body.cancel();
@@ -256,8 +278,8 @@ export const fixesDownloadRoute: DbRoute<PackageInput> = {
             return response;
         }
         catch (error) {
-            console.error('fixes_download_failed', { code: error instanceof FixesFailure ? error.code : 'FIXES_FAILED' });
-            return unavailable();
+            const diagnostic = jobDiagnostic(error, stage);
+            return packageUnavailable(ctx, input, 'download', stage, diagnostic.code, diagnostic);
         }
     },
 };

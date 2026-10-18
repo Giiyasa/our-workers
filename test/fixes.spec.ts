@@ -120,6 +120,52 @@ describe('provider credentials and hosts', () => {
     });
 });
 describe('R2 cache', () => {
+    it('reports the stored failure while cooling without fetching or requeueing', async () => {
+        const log = vi.fn(); vi.stubGlobal('console', { ...console, error: log });
+        const fetcher = vi.fn(); vi.stubGlobal('fetch', fetcher);
+        const queries: string[] = [];
+        const sql = sqlMock(q => {
+            queries.push(q);
+            if (q.includes('access_role_code')) return [{ access_role_code: 3 }];
+            if (q.includes('select e.app_id')) return [{ app_id: 620, snapshot: snap, revision }];
+            if (q.includes('select *,')) return [{ status: 'failed', cooling: true, error_code: 'DOWNLOAD_HTTP', attempts: 4 }];
+            return [];
+        });
+        const response = await fixesPrepareRoute.handle(context('/api/fixes/prepare'), input, sql);
+        expect(response.status).toBe(503);
+        expect(await response.json()).toMatchObject({ code: 'FIXES_UNAVAILABLE', error_code: 'DOWNLOAD_HTTP', stage: 'job_cooldown' });
+        expect(log).toHaveBeenCalledWith('fixes_prepare_failed', expect.objectContaining({ code: 'DOWNLOAD_HTTP', stage: 'job_cooldown', attempts: 4, fix_id: 'fixture' }));
+        expect(fetcher).not.toHaveBeenCalled();
+        expect(queries.some(q => q.includes('insert into fixes_package_jobs'))).toBe(false);
+    });
+    it('reports database failure stage without exposing exception text', async () => {
+        const log = vi.fn(); vi.stubGlobal('console', { ...console, error: log });
+        const sql = sqlMock(q => {
+            if (q.includes('access_role_code')) return [{ access_role_code: 3 }];
+            if (q.includes('select e.app_id')) return [{ app_id: 620, snapshot: snap, revision }];
+            if (q.includes('select *,')) throw Object.assign(new Error('secret database query'), { code: '22P02' });
+            return [];
+        });
+        const response = await fixesPrepareRoute.handle(context('/api/fixes/prepare'), input, sql);
+        expect(response.status).toBe(503);
+        const body = await response.json();
+        expect(body).toMatchObject({ error_code: 'PACKAGE_DB_22P02', stage: 'job_lookup' });
+        expect(JSON.stringify([body, log.mock.calls])).not.toContain('secret database query');
+    });
+    it('reports queue configuration failures at prepare time', async () => {
+        const sql = sqlMock(q => q.includes('access_role_code') ? [{ access_role_code: 3 }]
+            : q.includes('select e.app_id') ? [{ app_id: 620, snapshot: snap, revision }] : []);
+        const response = await fixesPrepareRoute.handle(context('/api/fixes/prepare'), input, sql);
+        expect(await response.json()).toMatchObject({ error_code: 'QUEUE_CONFIG', stage: 'queue_start' });
+    });
+    it('reports failed jobs when the download endpoint is called directly', async () => {
+        const sql = sqlMock(q => q.includes('access_role_code') ? [{ access_role_code: 3 }]
+            : q.includes('select e.app_id') ? [{ app_id: 620, snapshot: snap, revision }]
+            : q.includes('select *,') ? [{ status: 'failed', error_code: 'STORAGE_UPLOAD' }] : []);
+        const response = await fixesDownloadRoute.handle(context('/api/fixes/package'), input, sql);
+        expect(response.status).toBe(503);
+        expect(await response.json()).toMatchObject({ error_code: 'STORAGE_UPLOAD', stage: 'job_not_ready' });
+    });
     it('ready cache prepares download without contacting LuaTools', async () => {
         const key = packageObjectKey('fixture', revision, 'fix', token);
         const fetcher = vi.fn().mockResolvedValue(new Response(null));
@@ -156,6 +202,7 @@ describe('R2 cache', () => {
         });
         const res = await fixesPrepareRoute.handle(context('/api/fixes/prepare'), input, sql);
         expect(res.status).toBe(503);
+        expect(await res.json()).toMatchObject({ error_code: 'STORAGE_HTTP', stage: 'cache_head' });
         expect(wrote).toBe(false);
         expect(fetcher).toHaveBeenCalledTimes(1);
     });
