@@ -48,8 +48,13 @@ try{
  const reserve=providerQueries.find(q=>q.includes('insert into fixes_provider_usage'));
  assert.ok(pick&&reserve);
  const first='aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',second='bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee';
- const limits={'FIXES_CONFIG.dailyLimit':24,excludedAccountIds:[],reserveDownload:true};
+ // Reproduce postgres.js with fetch_types:false, rather than letting PGlite
+ // silently serialize JS arrays correctly and mask the production failure.
+ await assert.rejects(db.query('select $1::text[]',[postgresTypes.string.serialize([])]),error=>error.code==='22P02');
+ const limits={'FIXES_CONFIG.dailyLimit':24,excludedAccountArray:postgresTypes.string.serialize('{}'),reserveDownload:true};
  await db.query("insert into fixes_provider_accounts(account_id,label,session_encrypted,expires_at)values($1,'First',decode('01','hex'),now()+interval '1 hour'),($2,'Second',decode('02','hex'),now()+interval '1 hour')",[first,second]);
+ assert.equal((await template(pick,{...limits,excludedAccountArray:`{${first}}`})).rows[0].account_id,second,'rotation excludes the attempted account');
+ assert.equal((await template(pick,{...limits,excludedAccountArray:`{${first},${second}}`})).rows.length,0,'all attempted accounts are excluded');
  for(let i=0;i<48;i++) {
   await db.exec('BEGIN');
   const candidate=await template(pick,limits);assert.equal(candidate.rows.length,1);

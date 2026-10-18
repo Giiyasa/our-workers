@@ -387,13 +387,16 @@ export async function providerAccessToken(sql: Sql, env: Env, allowRefresh = tru
     accountId: string;
 }> {
     if (!/^[a-f\d]{64}$/i.test(env.FIXES_SESSION_KEY_HEX ?? '')) throw new FixesFailure('SESSION_CONFIG');
+    // fetch_types:false leaves text[] without a driver serializer. A raw JS []
+    // becomes an empty string (22P02), before an account can reserve any quota.
+    const excludedAccountArray = `{${excludedAccountIds.map(accountId).join(',')}}`;
     const row = await sql.begin(async (tx) => {
         await tx `update fixes_provider_accounts set status='needs_admin',last_error_code='SESSION_EXPIRED',updated_at=now()
  where status='ready' and expires_at<=now()+interval '30 seconds'`;
         const candidates = await tx `select a.account_id::text,encode(a.session_encrypted,'hex') as encrypted,a.xmin::text as version
  from fixes_provider_accounts a left join fixes_provider_usage u on u.account_id=a.account_id and u.usage_day=(now() at time zone 'Asia/Jakarta')::date
  where a.status='ready' and a.expires_at>now()+interval '30 seconds' and (a.blocked_until is null or a.blocked_until<=now())
- and not (a.account_id::text = any(${excludedAccountIds}::text[]))
+ and not (a.account_id::text = any(${excludedAccountArray}::text[]))
  and (${reserveDownload} = false or coalesce(u.download_count,0)<${FIXES_CONFIG.dailyLimit})
  order by coalesce(u.download_count,0),a.account_id for update of a skip locked limit 1`;
         if (!candidates[0])
@@ -412,7 +415,7 @@ export async function providerAccessToken(sql: Sql, env: Env, allowRefresh = tru
             const expired = await sql `select a.account_id::text from fixes_provider_accounts a
  left join fixes_provider_usage u on u.account_id=a.account_id and u.usage_day=(now() at time zone 'Asia/Jakarta')::date
  where (a.status='ready' or (a.status='needs_admin' and a.last_error_code='SESSION_EXPIRED'))
- and not (a.account_id::text = any(${excludedAccountIds}::text[]))
+ and not (a.account_id::text = any(${excludedAccountArray}::text[]))
  and a.expires_at<=now()+interval '30 seconds' and (a.blocked_until is null or a.blocked_until<=now())
  and (${reserveDownload} = false or coalesce(u.download_count,0)<${FIXES_CONFIG.dailyLimit})
  order by coalesce(u.download_count,0),a.account_id limit 4`;

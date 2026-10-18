@@ -24,6 +24,11 @@ function sqlMock(handler: (query: string, values: unknown[]) => unknown) {
     Object.assign(fn, { json: (v: unknown) => v, begin: async (cb: (tx: Sql) => unknown) => cb(fn), end: async () => { } });
     return fn;
 }
+function excludedAccounts(values: unknown[]): string[] {
+    const value = values.find(v => typeof v === 'string' && v.startsWith('{')) as string;
+    expect(typeof value).toBe('string');
+    return value.slice(1, -1).split(',').filter(Boolean);
+}
 const input = { fixId: 'fixture', revision, slot: 'fix' as const };
 const snap = {
     id: 'fixture',
@@ -351,7 +356,7 @@ describe('multiaccount provider controls', () => {
         vi.stubGlobal('fetch', fetcher);
         await expect(fetchFixPackage(sqlMock((q,v) => {
             calls.push(q);
-            if (q.includes('select a.account_id') && v.some(value => Array.isArray(value) && value.includes(row.account_id))) return [];
+            if (q.includes('select a.account_id') && excludedAccounts(v).includes(row.account_id)) return [];
             return q.includes('select download_hosts') ? [{ download_hosts: ['packages.test'] }] : [row];
         }), env, 'fixture', 'fix')).rejects.toMatchObject({ code: 'PROVIDER_LIMIT' });
         expect(calls.some(q => q.includes('insert into fixes_provider_usage'))).toBe(true);
@@ -453,7 +458,7 @@ describe('multiaccount provider controls', () => {
         const sql=sqlMock((q,v)=>{
             if(q.includes('select a.account_id') && q.includes('limit 4'))return [];
             if(q.includes('select a.account_id')) {
-                const excluded=v.find(Array.isArray) as string[];
+                const excluded=excludedAccounts(v);
                 return [first,second].filter(row=>!excluded.includes(row.account_id)).slice(0,1);
             }
             if(q.includes('insert into fixes_provider_usage')) {reservations++;return [{download_count:1}];}
@@ -475,7 +480,7 @@ describe('multiaccount provider controls', () => {
         const sql=sqlMock((q,v)=>{
             queries.push(q);
             if(q.includes('select a.account_id')) {
-                const excluded=v.find(Array.isArray) as string[];
+                const excluded=excludedAccounts(v);
                 return excluded.includes(broken.account_id)?[valid]:[broken];
             }
             if(q.includes('insert into fixes_provider_usage')){reservations++;return [{download_count:1}];}
@@ -546,7 +551,7 @@ describe('multiaccount provider controls', () => {
         let reservations=0;const selected:string[]=[];
         const sql=sqlMock((q,v)=>{
             if(q.includes('select a.account_id')){
-                const excluded=v.find(Array.isArray) as string[];
+                const excluded=excludedAccounts(v);
                 const id=ids.find(id=>!excluded.includes(id));return id?[{...row,account_id:id}]:[];
             }
             if(q.includes('insert into fixes_provider_usage')){reservations++;return [{download_count:1}];}
