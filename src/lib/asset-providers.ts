@@ -47,7 +47,7 @@ export async function readLua(response: Response): Promise<Uint8Array> {
 	let offset = 0;
 	for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
 	const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes);
-	if (!length || /^\s*[<{]/.test(text) || !/\baddappid\s*\(\s*\d+\s*,/.test(text)) {
+	if (!length || /^\s*[<{]/.test(text) || !/\baddappid\s*\(\s*\d+\s*[,)]/.test(text)) {
 		throw new AssetFailure("PROVIDER_BAD_FILE", "Provider mengirim isi yang bukan file Lua yang didukung.");
 	}
 	return bytes;
@@ -190,7 +190,7 @@ export async function readLuaToolsPackage(response: Response, gameId: number): P
         catch {throw new AssetFailure("PROVIDER_BAD_FILE","Paket LuaTools tidak memiliki file Lua yang valid.");}
     }
     const valid=await readLua(new Response(lua as Uint8Array<ArrayBuffer>));
-    if(!new RegExp(`\\baddappid\\s*\\(\\s*${gameId}\\s*,`).test(new TextDecoder().decode(valid)))
+    if(!new RegExp(`\\baddappid\\s*\\(\\s*${gameId}\\s*[,)]`).test(new TextDecoder().decode(valid)))
         throw new AssetFailure("PROVIDER_BAD_FILE","File LuaTools tidak sesuai AppID.");
     return valid;
 }

@@ -122,6 +122,22 @@ describe("LuaTools fourth source",()=>{
         for(const bytes of [new TextEncoder().encode('addappid(621, 0, "wrong")'),new TextEncoder().encode('<html>Error</html>'),zip([{name:"a.lua",text:lua},{name:"b.lua",text:lua}]),zip([{name:"../620.lua",text:lua}])])
             await expect(readLuaToolsPackage(new Response(bytes as Uint8Array<ArrayBuffer>),620)).rejects.toThrow();
     });
+    it('accepts Luie single-argument main AppID in bare Lua and ZIP without modifying the payload', async () => {
+        // Same structure as the reported 3591180 file, with synthetic depot data.
+        const content = '-- Main AppID\r\naddappid(3591180)\r\n-- Main Depots\r\naddappid(3591181, 1, "fixture")\r\naddappid(4590370) -- DLC\r\n';
+        for (const payload of [new TextEncoder().encode(content), zip([{ name: '3591180.lua', text: content }])]) {
+            expect(new TextDecoder().decode(await readLuaToolsPackage(new Response(payload as Uint8Array<ArrayBuffer>), 3591180))).toBe(content);
+        }
+        const single = 'addappid(3591180)';
+        expect(new TextDecoder().decode(await readLua(new Response(single)))).toBe(single);
+        expect(new TextDecoder().decode(await readLuaToolsPackage(new Response(single), 3591180))).toBe(single);
+    });
+    it('requires an exact AppID and an argument delimiter', async () => {
+        for (const content of ['addappid(35911801)', 'addappid(359118)', 'addappid(3591180foo)', 'addappid(3591180', 'addappid(3591181, 1, "fixture")']) {
+            await expect(readLuaToolsPackage(new Response(content), 3591180)).rejects.toMatchObject({ code: 'PROVIDER_BAD_FILE' });
+        }
+        expect(new TextDecoder().decode(await readLuaToolsPackage(new Response('addappid( 3591180 )'), 3591180))).toBe('addappid( 3591180 )');
+    });
     it("rejects corrupt and oversized decompressed Lua",async()=>{
         expect(luaZipCrc(new TextEncoder().encode("123456789"))).toBe(0xcbf43926);
         const bytes=zip([{name:"620.lua",text:lua}]);bytes[14]^=1; // central/local CRC mismatch is validated against output below
