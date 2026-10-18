@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { digest, fetchFixPackage, safeFilename, syncDetails, syncListings } from '../src/lib/fixes-provider';
+import { digest, fetchFixPackage, fetchRyuuFallbackPackage, safeFilename, syncDetails, syncListings } from '../src/lib/fixes-provider';
 import { validatePackagePrefix } from '../src/lib/fixes-storage';
 import { parseRyuuCatalog, ryuuFixUrl } from '../src/lib/ryuu-fixes';
 import { fixesDetailRoute } from '../src/routes/fixes';
@@ -145,6 +145,41 @@ describe('Ryuu detail routing', () => {
 describe('Ryuu package authentication', () => {
     const env = { RYUU_AUTH_CODE: 'fixture-secret-code' } as Env;
     const sql = () => sqlMock(q => q.includes('select e.app_id,e.snapshot') ? [{ app_id: 730, snapshot: entry() }] : []);
+    it('finds the fallback by numeric AppID and preserves its filename without reserving LuaTools quota', async () => {
+        const calls: URL[] = [];
+        const queries: string[] = [];
+        vi.stubGlobal('fetch', vi.fn(async (raw: string) => {
+            const url = new URL(raw); calls.push(url);
+            if (url.pathname === '/files/fixes.json') return Response.json([ryuuGame('01547000'), ryuuGame('730')]);
+            if (url.hostname === 'cloudflare-dns.com') return Response.json({ Status: 0, Answer: [{ type: 1, data: '93.184.216.34' }] });
+            return new Response(new Uint8Array([80,75,3,4]));
+        }));
+        const result = await fetchRyuuFallbackPackage(sqlMock(q => { queries.push(q); return []; }), env, 1547000);
+        expect(result.filename).toBe('fixture.zip');
+        await result.source.body?.cancel();
+        expect(calls.filter(url => url.searchParams.has('auth_code'))).toHaveLength(1);
+        expect(queries.every(q => !q.includes('fixes_provider_accounts') && !q.includes('fixes_provider_usage'))).toBe(true);
+    });
+    it('rejects missing or ambiguous fallback packages instead of downloading another game or variant', async () => {
+        const game = ryuuGame('1547000');
+        game.fixes.push({ ...game.fixes[0], filename: 'variant.zip', href: 'https://generator.ryuu.lol/fixes/variant.zip' });
+        const fetcher = vi.fn().mockImplementation(async () => Response.json([game]));
+        vi.stubGlobal('fetch', fetcher);
+        await expect(fetchRyuuFallbackPackage(sql(), env, 730)).rejects.toMatchObject({ code: 'RYUU_FALLBACK_MISSING' });
+        await expect(fetchRyuuFallbackPackage(sql(), env, 1547000)).rejects.toMatchObject({ code: 'RYUU_FALLBACK_AMBIGUOUS' });
+        expect(fetcher).toHaveBeenCalledTimes(2);
+    });
+    it('blocks cross-origin redirects for fallback downloads too', async () => {
+        const calls: string[] = [];
+        vi.stubGlobal('fetch', vi.fn(async (raw: string) => {
+            const url = new URL(raw); calls.push(url.hostname);
+            if (url.pathname === '/files/fixes.json') return Response.json([ryuuGame()]);
+            if (url.hostname === 'cloudflare-dns.com') return Response.json({ Status: 0, Answer: [{ type: 1, data: '93.184.216.34' }] });
+            return new Response(null, { status: 302, headers: { location: 'https://evil.test/package' } });
+        }));
+        await expect(fetchRyuuFallbackPackage(sql(), env, 730)).rejects.toMatchObject({ code: 'RYUU_DOWNLOAD_REDIRECT' });
+        expect(calls).not.toContain('evil.test');
+    });
     it('attaches the secret only to the fixed Ryuu file request without using LuaTools accounts', async () => {
         const calls: URL[] = [];
         vi.stubGlobal('fetch', vi.fn(async (raw: string, init?: RequestInit) => {

@@ -3,6 +3,10 @@ import { readR2Config, presignR2Get, signR2Request } from './r2';
 import { FixesFailure, type Slot } from './fixes-provider';
 const PART = 8 * 1024 * 1024;
 const MAX = 4 * 1024 * 1024 * 1024;
+async function storageText(response: Response): Promise<string> {
+	try { return await response.text(); }
+	catch { throw new FixesFailure('STORAGE_BODY_ERROR'); }
+}
 export function packageObjectKey(fixId: string, revision: string, slot: Slot, token: string): string {
 	const id = createHash('sha256').update(fixId).digest('hex');
 	if (!/^[a-f0-9]{64}$/.test(revision) || !/^[a-f0-9-]{36}$/.test(token) || !['manifest', 'fix'].includes(slot))
@@ -74,12 +78,19 @@ export async function storePackage(
 	filename: string,
 	heartbeat: () => Promise<void>,
 ): Promise<{ size: number; sha256: string }> {
-	const config = checkedConfig(env, key);
+	let config: ReturnType<typeof checkedConfig>;
+	try { config = checkedConfig(env, key); }
+	catch (error) {
+		await source.body?.cancel().catch(() => {});
+		throw error;
+	}
 	const reader = source.body?.getReader();
 	if (!reader) throw new FixesFailure('PACKAGE_EMPTY');
 	let uploadId: string | undefined;
 	const request = async (method: 'POST' | 'PUT' | 'DELETE', query: Record<string, string>, body?: Uint8Array | string) => {
-		const signed = await signR2Request(config, key, method, query, body);
+		let signed: Awaited<ReturnType<typeof signR2Request>>;
+		try { signed = await signR2Request(config, key, method, query, body); }
+		catch { throw new FixesFailure('STORAGE_SIGNING'); }
 		let res: Response;
 		try {
 			res = await fetch(signed.url, {
@@ -94,7 +105,7 @@ export async function storePackage(
 		}
 		if (!res.ok) {
 			await res.body?.cancel();
-			throw new FixesFailure('STORAGE_UPLOAD');
+			throw new FixesFailure('STORAGE_UPLOAD', res.status);
 		}
 		return res;
 	};
@@ -102,7 +113,7 @@ export async function storePackage(
 		const declared = Number(source.headers.get('content-length'));
 		if (Number.isFinite(declared) && declared > MAX) throw new FixesFailure('PACKAGE_TOO_LARGE');
 		const started = await request('POST', { uploads: '' });
-		uploadId = xmlValue(await started.text(), 'UploadId');
+		uploadId = xmlValue(await storageText(started), 'UploadId');
 		const hasher = createHash('sha256');
 		let size = 0,
 			filled = 0,
@@ -125,7 +136,10 @@ export async function storePackage(
 			await heartbeat();
 		};
 		for (;;) {
-			const { value, done } = await reader.read();
+			let chunk: ReadableStreamReadResult<Uint8Array>;
+			try { chunk = await reader.read(); }
+			catch { throw new FixesFailure('DOWNLOAD_BODY_ERROR'); }
+			const { value, done } = chunk;
 			if (done) break;
             if (Date.now() - lastHeartbeat > 30_000) { await heartbeat(); lastHeartbeat = Date.now(); }
 			size += value.length;
@@ -150,7 +164,7 @@ export async function storePackage(
 		await heartbeat();
 		const xml = `<CompleteMultipartUpload>${parts.map((p) => `<Part><PartNumber>${p.part}</PartNumber><ETag>${escapeXml(p.etag)}</ETag></Part>`).join('')}</CompleteMultipartUpload>`;
 		const completed = await request('POST', { uploadId }, xml);
-		const result = await completed.text();
+		const result = await storageText(completed);
 		if (!/<CompleteMultipartUploadResult[ >]/.test(result) || /<Error[ >]/.test(result)) throw new FixesFailure('STORAGE_COMPLETE');
 		uploadId = undefined;
 		return { size, sha256: hasher.digest('hex') };

@@ -248,6 +248,17 @@ describe('R2 cache', () => {
         await expect(storePackage(env, packageObjectKey('fixture', revision, 'fix', token), new Response('<html>error</html>'), 'fix.zip', async () => { })).rejects.toMatchObject({ code: 'PACKAGE_FORMAT' });
         expect(methods).toEqual(['POST', 'DELETE']);
     });
+    it('classifies a broken download stream and aborts the multipart upload', async () => {
+        const methods: string[] = [];
+        vi.stubGlobal('fetch', vi.fn(async (_: string, init: RequestInit) => {
+            methods.push(init.method!);
+            return init.method === 'POST' ? new Response('<UploadId>fixture</UploadId>') : new Response(null);
+        }));
+        const stream = new ReadableStream<Uint8Array>({ pull(controller) { controller.error(new TypeError('connection reset')); } });
+        await expect(storePackage(env, packageObjectKey('fixture', revision, 'fix', token), new Response(stream), 'fix.zip', async () => {}))
+            .rejects.toMatchObject({ code: 'DOWNLOAD_BODY_ERROR' });
+        expect(methods).toEqual(['POST', 'DELETE']);
+    });
 });
 describe('queue malformed messages', () => {
     it('acknowledges null payload without DB or provider access', async () => {

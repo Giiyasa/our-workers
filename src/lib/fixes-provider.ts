@@ -581,7 +581,36 @@ async function requestPackageLink(sql: Sql, env: Env, fixId: string, slot: Slot)
 }
 export async function fetchFixPackage(sql: Sql, env: Env, fixId: string, slot: Slot): Promise<Response> {
     const data = await requestPackageLink(sql, env, fixId, slot);
-    let url = await verifiedDownloadUrl(data?.url, sql);
+    return fetchPackageUrl(sql, data?.url, fixId.startsWith('ryuu:'));
+}
+
+// Resolve on demand so existing primary snapshots need no migration or catalog resync.
+// Multiple Ryuu variants cannot safely be treated as interchangeable packages.
+export async function fetchRyuuFallbackPackage(sql: Sql, env: Env, appId: number): Promise<{ source: Response; filename: string }> {
+    if (!Number.isSafeInteger(appId) || appId <= 0) throw new FixesFailure('RYUU_ENTRY');
+    if (!env.RYUU_AUTH_CODE?.trim()) throw new FixesFailure('RYUU_AUTH_CONFIG');
+    const game = (await fetchRyuuCatalog()).find(game => Number(game.appid) === appId);
+    if (!game?.fixes.length) throw new FixesFailure('RYUU_FALLBACK_MISSING');
+    if (game.fixes.length !== 1) throw new FixesFailure('RYUU_FALLBACK_AMBIGUOUS');
+    const entry = game.fixes[0];
+    const url = ryuuFixUrl(entry.sourceUrl);
+    const filename = safeFilename(entry.fixFilename, 'fix');
+    url.searchParams.set('auth_code', env.RYUU_AUTH_CODE);
+    return { source: await fetchPackageUrl(sql, url.toString(), true), filename };
+}
+
+export function canFallbackToRyuu(error: unknown): boolean {
+    return error instanceof FixesFailure && [
+        'PROVIDER_UNAVAILABLE', 'PROVIDER_AUTH', 'PROVIDER_LIMIT', 'PROVIDER_HTTP',
+        'PROVIDER_NETWORK', 'PROVIDER_EMPTY', 'PROVIDER_BODY_ERROR', 'CATALOG_FORMAT',
+        'DOWNLOAD_URL', 'DOWNLOAD_HOST', 'DOWNLOAD_DNS', 'DOWNLOAD_NETWORK',
+        'DOWNLOAD_HTTP', 'DOWNLOAD_REDIRECT', 'DOWNLOAD_BODY_ERROR',
+        'PACKAGE_FORMAT', 'PACKAGE_EMPTY', 'PACKAGE_TRUNCATED',
+    ].includes(error.code);
+}
+
+async function fetchPackageUrl(sql: Sql, raw: unknown, ryuu: boolean): Promise<Response> {
+    let url = await verifiedDownloadUrl(raw, sql);
     // Never send the provider bearer token to package hosts, including redirects.
     for (let redirects = 0; redirects < 4; redirects++) {
         let res: Response;
@@ -598,14 +627,14 @@ export async function fetchFixPackage(sql: Sql, env: Env, fixId: string, slot: S
                 throw new FixesFailure('DOWNLOAD_REDIRECT');
             const next = new URL(location, url);
             // A query credential must never be sent to another origin.
-            if (fixId.startsWith('ryuu:') && next.origin !== RYUU)
+            if (ryuu && next.origin !== RYUU)
                 throw new FixesFailure('RYUU_DOWNLOAD_REDIRECT');
             url = await verifiedDownloadUrl(next.toString(), sql);
             continue;
         }
         if (!res.ok || !res.body) {
             await res.body?.cancel();
-            throw new FixesFailure('DOWNLOAD_HTTP');
+            throw new FixesFailure('DOWNLOAD_HTTP', res.status);
         }
         return res;
     }
