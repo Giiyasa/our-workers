@@ -2,6 +2,7 @@ import { createDb, type Sql } from "./db";
 import { encryptAsset, decryptAsset } from "./asset-crypto";
 import { AssetFailure, fetchProviderLua, readLua } from "./asset-providers";
 import { uploadR2Lua } from "./r2";
+import { writeAssetLua } from "./asset-write";
 
 // Retry only transport failures, never SQL/schema/trigger errors. Each attempt owns
 // a fresh client; lease checks inside the transaction also cover an ambiguous commit.
@@ -106,9 +107,7 @@ export async function consumeAssetJob(message: AssetMessage, env: Env): Promise<
 				if (!locked.length) return;
 				stage = "database_asset_write";
 				assetWriteStartedAt = Date.now();
-				await tx`insert into game_assets (game_id, lua_data, encryption_version)
-					values (${message.gameId}::bigint, decode(${hex}, 'hex'), 1)
-					on conflict (game_id) do update set lua_data = excluded.lua_data, encryption_version = 1`;
+				await writeAssetLua(tx, message.gameId, hex);
 				stage = "database_job_ready";
 				await tx`update game_asset_jobs set status = 'ready', r2_object_key = ${objectKey}, last_provider = ${source},
 					error_code = null, error_message = null, next_retry_at = null,
