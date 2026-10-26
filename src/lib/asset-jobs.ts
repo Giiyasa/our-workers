@@ -76,24 +76,27 @@ export async function consumeAssetJob(message: AssetMessage, env: Env): Promise<
 			await uploadR2Lua(env, objectKey, bytes);
 			stage = "database_publish";
 			await sql.begin(async (tx) => {
+				stage = "database_lock";
 				const locked = await tx`select game_id from game_asset_jobs where game_id = ${message.gameId}::bigint
 					and lease_token = ${token}::uuid and status = 'processing' and lease_expires_at > now() for update`;
 				if (!locked.length) return;
 				const hex = Array.from(blob, (byte) => byte.toString(16).padStart(2, "0")).join("");
+				stage = "database_asset_write";
 				await tx`insert into game_assets (game_id, lua_data, encryption_version)
 					values (${message.gameId}::bigint, decode(${hex}, 'hex'), 1)
 					on conflict (game_id) do update set lua_data = excluded.lua_data, encryption_version = 1`;
+				stage = "database_job_ready";
 				await tx`update game_asset_jobs set status = 'ready', r2_object_key = ${objectKey}, last_provider = ${source},
 					error_code = null, error_message = null, next_retry_at = null,
 					lease_token = null, lease_expires_at = null, updated_at = now() where game_id = ${message.gameId}::bigint`;
+				stage = "database_game_ready";
 				await tx`update game_lists set is_unavailable_game = false where app_id = ${message.gameId}::bigint`;
+				stage = "database_commit";
 			});
 		} catch (error) {
 			const known = error instanceof AssetFailure;
-			const rawCode = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "";
 			console.error("asset_job_failed", {
-				appId: message.gameId, stage,
-				code: known ? error.code : /^[A-Z0-9]{5}$/.test(rawCode) ? rawCode : "ASSET_FETCH_FAILED",
+				appId: message.gameId, ...assetJobDiagnostic(error, stage),
 				reason: error instanceof TypeError ? "type_or_network_error" : "job_error",
 			});
 			await sql.begin(async (tx) => {
@@ -111,4 +114,16 @@ export async function consumeAssetJob(message: AssetMessage, env: Env): Promise<
 		}
 		return "done";
 	} finally { await sql.end({ timeout: 5 }); }
+}
+
+// Log only fixed diagnostics: raw database errors can include credentials and asset data.
+export function assetJobDiagnostic(error: unknown, stage: string) {
+	const rawCode = error && typeof error === "object" && "code" in error ? error.code : undefined;
+	const nativeCode = typeof rawCode === "string" && /^(?:[0-9A-Z]{5}|CONNECTION_CLOSED|CONNECTION_ENDED|CONNECT_TIMEOUT|CONNECTION_DESTROYED)$/.test(rawCode)
+		? rawCode : undefined;
+	return {
+		stage,
+		code: error instanceof AssetFailure ? error.code : nativeCode ?? "ASSET_FETCH_FAILED",
+		error_name: error instanceof Error && /^[A-Za-z0-9_]{1,60}$/.test(error.name) ? error.name : "UnknownError",
+	};
 }
