@@ -49,11 +49,50 @@ describe("provider ordering", () => {
 		const called = new URL(String(fetcher.mock.calls[0][0]));
 		expect(called.searchParams.get("auth_code")).toBe("a&b");
 	});
-	it("does not treat provider 2 outages as not_found or rotate into provider 3", async () => {
-		const fetcher = vi.fn().mockResolvedValue(new Response("unavailable", { status: 503 }));
+	it.each(["http503", "timeout", "network", "bad_file", "stream_error", "missing_key"])("falls back from Ryuu %s to Luie", async failure => {
+		vi.mocked(providerAccessToken).mockResolvedValue({token:"synthetic",accountId:"fixture",version:"1"});
+		const fetcher = vi.fn(async (raw: string | URL) => {
+			if (new URL(raw).hostname !== "generator.ryuu.lol") return new Response(lua);
+			if (failure === "timeout") throw new DOMException("Timed out", "TimeoutError");
+			if (failure === "network") throw new TypeError("Connection failed");
+			if (failure === "stream_error") return new Response(new ReadableStream({start(controller){controller.error(new TypeError("Read failed"));}}));
+			return new Response(failure === "bad_file" ? "<html>Error</html>" : "unavailable", {status: failure === "http503" ? 503 : 200});
+		});
 		vi.stubGlobal("fetch", fetcher);
-		await expect(fetchProviderLua({} as Sql, env, 620)).rejects.toMatchObject({ code: "PROVIDER_UNAVAILABLE" });
-		expect(fetcher).toHaveBeenCalledTimes(1);
+		const result = await fetchProviderLua({} as Sql, {...env, RYUU_AUTH_CODE: failure === "missing_key" ? "" : env.RYUU_AUTH_CODE}, 620);
+		expect(result.source).toBe("luatools_luie");
+		expect(new TextDecoder().decode(result.bytes)).toBe(lua);
+		expect(fetcher).toHaveBeenCalledTimes(failure === "missing_key" ? 1 : 2);
+	});
+	it("retains Ryuu failure when Luie has no result and Hubcap is unconfigured", async () => {
+		vi.mocked(providerAccessToken).mockResolvedValue({token:"synthetic",accountId:"fixture",version:"1"});
+		vi.stubGlobal("fetch", vi.fn(async(raw: string | URL) => new Response(null, {status:new URL(raw).hostname === "generator.ryuu.lol" ? 503 : 404})));
+		await expect(fetchProviderLua({} as Sql, env, 620)).rejects.toMatchObject({code:"PROVIDER_UNAVAILABLE",message:expect.stringContaining("Ryuu")});
+	});
+	it.each(["hubcap_success", "ryuu_outage", "all_missing"])("completes the provider chain: %s", async scenario => {
+		// Minimal reservation DB fixture; no real provider accounts or quota are touched.
+		const query = Object.assign((strings: TemplateStringsArray | unknown[]) => {
+			if (!("raw" in strings)) return strings;
+			const text = strings.join("?");
+			if (text.includes("select provider_key_id from provider_key_usage") || text.includes("returning provider_key_id") || text.includes("returning reservation_id"))
+				return Promise.resolve([{provider_key_id:"fixture",reservation_id:"fixture"}]);
+			return Promise.resolve([]);
+		}, {begin: async (operation: (tx: unknown) => unknown) => operation(query)});
+		vi.mocked(providerAccessToken).mockResolvedValue({token:"synthetic",accountId:"fixture",version:"1"});
+		const fetcher=vi.fn(async(raw: string | URL) => {
+			const host=new URL(raw).hostname;
+			if (host === "generator.ryuu.lol") return new Response(null,{status:scenario === "all_missing" ? 404 : 503});
+			if (host === "hubcapmanifest.com" && scenario === "hubcap_success") return new Response(lua);
+			return new Response(null,{status:404});
+		});
+		vi.stubGlobal("fetch",fetcher);
+		const result=fetchProviderLua(query as unknown as Sql,{...env,HUBCAP_API_KEYS:JSON.stringify([{id:"fixture",key:"synthetic"}])},620);
+		if (scenario === "hubcap_success") {
+			expect(await result).toMatchObject({source:"provider_3",bytes:new TextEncoder().encode(lua)});
+		} else {
+			await expect(result).rejects.toMatchObject({code:scenario === "all_missing" ? "ASSET_NOT_FOUND" : "PROVIDER_UNAVAILABLE"});
+		}
+		expect(fetcher.mock.calls.map(([raw])=>new URL(raw).hostname)).toEqual(["generator.ryuu.lol","lua.tools","hubcapmanifest.com"]);
 	});
 	it("preserves the LuaTools failure when Hubcap is also unconfigured", async () => {
 		vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response('{"error":"Game not found"}', { status: 404 })));

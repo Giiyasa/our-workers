@@ -228,16 +228,24 @@ async function luaTools(sql: Sql, env: Env, gameId: number): Promise<Uint8Array 
 }
 
 export async function fetchProviderLua(sql: Sql, env: Env, gameId: number): Promise<{ bytes: Uint8Array; source: string }> {
-	if (!env.RYUU_AUTH_CODE?.trim()) throw new AssetFailure("PROVIDER_CONFIG", "Key provider 2 belum dikonfigurasi.");
-	const url = new URL("https://generator.ryuu.lol/resellerlua");
-	url.searchParams.set("appid", String(gameId));
-	url.searchParams.set("auth_code", env.RYUU_AUTH_CODE);
-	const response = await providerRequest("ryuu", "lua", url, { signal: AbortSignal.timeout(8000) });
-	if (response.status !== 404) {
-		if (!response.ok) { await response.body?.cancel(); throw new AssetFailure("PROVIDER_UNAVAILABLE", "Provider 2 sedang tidak dapat dihubungi."); }
-		return { bytes: await readLua(response), source: "provider_2" };
+	let ryuuFailure: AssetFailure | undefined;
+	try {
+		if (!env.RYUU_AUTH_CODE?.trim()) throw new AssetFailure("PROVIDER_CONFIG", "Key provider 2 belum dikonfigurasi.");
+		const url = new URL("https://generator.ryuu.lol/resellerlua");
+		url.searchParams.set("appid", String(gameId));
+		url.searchParams.set("auth_code", env.RYUU_AUTH_CODE);
+		const response = await providerRequest("ryuu", "lua", url, { signal: AbortSignal.timeout(8000) });
+		if (response.status !== 404) {
+			if (!response.ok) { await response.body?.cancel(); throw new AssetFailure("PROVIDER_UNAVAILABLE", "Ryuu sementara gagal dihubungi."); }
+			return { bytes: await readLua(response), source: "provider_2" };
+		}
+		await response.body?.cancel();
+	} catch (error) {
+		// A failed provider is not evidence that the game is missing. Try the next source.
+		ryuuFailure = error instanceof AssetFailure ? error
+			: new AssetFailure("PROVIDER_UNAVAILABLE", "Ryuu sementara gagal dihubungi.");
+		console.warn("ryuu_lua_fallback", { appId: gameId, code: ryuuFailure.code });
 	}
-	await response.body?.cancel();
 	let luatools: Uint8Array | null = null;
 	let luieFailure: AssetFailure | undefined;
 	try { luatools = await luaTools(sql, env, gameId); }
@@ -250,11 +258,13 @@ export async function fetchProviderLua(sql: Sql, env: Env, gameId: number): Prom
 	try { bytes = await hubcap(sql, env, gameId); }
 	catch (error) {
 		if (!(error instanceof AssetFailure)) throw error;
-		console.warn('asset_fallback_failed', { appId: gameId, luieCode: luieFailure?.code ?? 'NOT_FOUND', hubcapCode: error.code });
+		console.warn('asset_fallback_failed', { appId: gameId, ryuuCode: ryuuFailure?.code ?? 'NOT_FOUND', luieCode: luieFailure?.code ?? 'NOT_FOUND', hubcapCode: error.code });
 		if (luieFailure) throw new AssetFailure(luieFailure.code, `${luieFailure.message} Fallback Hubcap juga tidak tersedia.`, luieFailure.retrySeconds);
+		if (ryuuFailure) throw new AssetFailure(ryuuFailure.code, `${ryuuFailure.message} Fallback Hubcap juga tidak tersedia.`, ryuuFailure.retrySeconds);
 		throw error;
 	}
 	if (!bytes && luieFailure) throw luieFailure;
+	if (!bytes && ryuuFailure) throw ryuuFailure;
 	if (!bytes) throw new AssetFailure("ASSET_NOT_FOUND", "Asset game belum tersedia pada semua provider.", 3600);
 	return { bytes, source: "provider_3" };
 }
